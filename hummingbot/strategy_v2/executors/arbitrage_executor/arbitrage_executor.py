@@ -192,7 +192,7 @@ class ArbitrageExecutor(ExecutorBase):
         self.buy_order.order_id = self.place_order(
             connector_name=self.buying_market.connector_name,
             trading_pair=self.buying_market.trading_pair,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT,
             side=TradeType.BUY,
             amount=self.order_amount,
             price=self._last_buy_price,
