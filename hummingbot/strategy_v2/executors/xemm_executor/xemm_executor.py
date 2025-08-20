@@ -277,9 +277,10 @@ class XEMMExecutor(ExecutorBase):
         taker_order_id = self.place_order(
             connector_name=self.taker_connector,
             trading_pair=self.taker_trading_pair,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT,
             side=self.taker_order_side,
-            amount=self.config.order_amount)
+            amount=self.config.order_amount,
+            price=self._taker_result_price)
         self.taker_order = TrackedOrder(order_id=taker_order_id)
 
     def process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
