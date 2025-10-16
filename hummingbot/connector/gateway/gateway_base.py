@@ -468,16 +468,11 @@ class GatewayBase(ConnectorBase):
                 continue
 
             tx_status: int = tx_details["txStatus"]
-
-            # Call chain-specific method to get transaction receipt
-            tx_receipt = self._get_transaction_receipt_from_details(tx_details)
+            fee = tx_details.get("fee", 0)
 
             # Chain-specific check for transaction success
-            if self._is_transaction_successful(tx_status, tx_receipt):
-                # Calculate fee using chain-specific method
-                fee = self._calculate_transaction_fee(tracked_order, tx_receipt)
-
-                self.process_transaction_confirmation_update(tracked_order=tracked_order, fee=fee)
+            if tx_status == 1:  # TransactionStatus.CONFIRMED.value
+                self.process_transaction_confirmation_update(tracked_order=tracked_order, fee=Decimal(str(fee or 0)))
 
                 order_update: OrderUpdate = OrderUpdate(
                     client_order_id=tracked_order.client_order_id,
@@ -487,21 +482,28 @@ class GatewayBase(ConnectorBase):
                 )
                 self._order_tracker.process_order_update(order_update)
 
-            # Check if transaction is still pending using chain-specific method
-            elif self._is_transaction_pending(tx_status):
+            # Check if transaction is still pending
+            elif tx_status == 0:  # TransactionStatus.PENDING.value
                 pass
 
             # Transaction failed
-            elif self._is_transaction_failed(tx_status, tx_receipt):
+            elif tx_status == -1:  # TransactionStatus.FAILED.value
                 self.logger().network(
-                    f"Error fetching transaction status for the order {tracked_order.client_order_id}: {tx_details}.",
-                    app_warning_msg=f"Failed to fetch transaction status for the order {tracked_order.client_order_id}."
+                    f"Transaction failed for order {tracked_order.client_order_id}: {tx_details}.",
+                    app_warning_msg=f"Transaction failed for order {tracked_order.client_order_id}."
                 )
-                await self._order_tracker.process_order_not_found(tracked_order.client_order_id)
+                order_update: OrderUpdate = OrderUpdate(
+                    client_order_id=tracked_order.client_order_id,
+                    trading_pair=tracked_order.trading_pair,
+                    update_timestamp=self.current_timestamp,
+                    new_state=OrderState.FAILED
+                )
+                self._order_tracker.process_order_update(order_update)
 
     def process_transaction_confirmation_update(self, tracked_order: GatewayInFlightOrder, fee: Decimal):
+        fee_asset = tracked_order.fee_asset if tracked_order.fee_asset else self._native_currency
         trade_fee: TradeFeeBase = AddedToCostTradeFee(
-            flat_fees=[TokenAmount(tracked_order.fee_asset, fee)]
+            flat_fees=[TokenAmount(fee_asset, fee)]
         )
 
         trade_update: TradeUpdate = TradeUpdate(
@@ -522,6 +524,14 @@ class GatewayBase(ConnectorBase):
         """
         Helper to create and process an OrderUpdate from a transaction hash and result dict.
         """
+        # Extract fee from data field if present (new response format)
+        # Otherwise fall back to top-level fee field (legacy format)
+        fee = 0
+        if "data" in transaction_result and isinstance(transaction_result["data"], dict):
+            fee = transaction_result["data"].get("fee", 0)
+        else:
+            fee = transaction_result.get("fee", 0)
+
         order_update = OrderUpdate(
             client_order_id=order_id,
             exchange_order_id=transaction_hash,
@@ -529,49 +539,8 @@ class GatewayBase(ConnectorBase):
             update_timestamp=self.current_timestamp,
             new_state=OrderState.OPEN,
             misc_updates={
-                "nonce": transaction_result.get("nonce", 0),
-                "gas_price": Decimal(transaction_result.get("gasPrice", 0)),
-                "gas_limit": int(transaction_result.get("gasLimit", 0)),
-                "gas_cost": Decimal(transaction_result.get("fee", 0)),
+                "gas_cost": Decimal(str(fee or 0)),
                 "gas_price_token": self._native_currency,
-                "fee_asset": self._native_currency
             }
         )
         self._order_tracker.process_order_update(order_update)
-
-    def _get_transaction_receipt_from_details(self, tx_details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if self.chain == "ethereum":
-            return tx_details.get("txReceipt")
-        elif self.chain == "solana":
-            return tx_details.get("txData")
-        raise NotImplementedError(f"Unsupported chain: {self.chain}")
-
-    def _is_transaction_successful(self, tx_status: int, tx_receipt: Optional[Dict[str, Any]]) -> bool:
-        if self.chain == "ethereum":
-            return tx_status == 1 and tx_receipt is not None and tx_receipt.get("status") == 1
-        elif self.chain == "solana":
-            return tx_status == 1 and tx_receipt is not None
-        raise NotImplementedError(f"Unsupported chain: {self.chain}")
-
-    def _is_transaction_pending(self, tx_status: int) -> bool:
-        if self.chain == "ethereum":
-            return tx_status in [0, 2, 3]
-        elif self.chain == "solana":
-            return tx_status == 0
-        raise NotImplementedError(f"Unsupported chain: {self.chain}")
-
-    def _is_transaction_failed(self, tx_status: int, tx_receipt: Optional[Dict[str, Any]]) -> bool:
-        if self.chain == "ethereum":
-            return tx_status == -1 or (tx_receipt is not None and tx_receipt.get("status") == 0)
-        elif self.chain == "solana":
-            return tx_status == -1
-        raise NotImplementedError(f"Unsupported chain: {self.chain}")
-
-    def _calculate_transaction_fee(self, tracked_order: GatewayInFlightOrder, tx_receipt: Dict[str, Any]) -> Decimal:
-        if self.chain == "ethereum":
-            gas_used: int = tx_receipt["gasUsed"]
-            gas_price: Decimal = tracked_order.gas_price
-            return Decimal(str(gas_used)) * gas_price / Decimal(1e9)
-        elif self.chain == "solana":
-            return Decimal(tx_receipt["meta"]["fee"]) / Decimal(1e9)
-        raise NotImplementedError(f"Unsupported chain: {self.chain}")

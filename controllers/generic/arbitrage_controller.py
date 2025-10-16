@@ -35,7 +35,8 @@ class ArbitrageController(ControllerBase):
         "binance-smart-chain": "BNB",
         "polygon": "POL",
         "avalanche": "AVAX",
-        "dexalot": "AVAX"
+        "dexalot": "AVAX",
+        "base": "ETH"
     }
 
     def __init__(self, config: ArbitrageControllerConfig, *args, **kwargs):
