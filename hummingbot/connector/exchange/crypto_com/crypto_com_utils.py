@@ -28,18 +28,26 @@ def is_exchange_information_valid(exchange_info: Dict[str, Any]) -> bool:
 def convert_from_exchange_symbol(exchange_symbol: str) -> str:
     """
     Converts an exchange symbol to Hummingbot format
-    :param exchange_symbol: symbol in exchange format (e.g., "BTC_USDT")
+    Crypto.com uses _USD for USDT pairs (e.g., "BTC_USD" -> "BTC-USDT")
+    :param exchange_symbol: symbol in exchange format (e.g., "BTC_USD")
     :return: symbol in Hummingbot format (e.g., "BTC-USDT")
     """
+    # Convert _USD to -USDT for Crypto.com's format
+    if exchange_symbol.endswith("_USD"):
+        return exchange_symbol[:-4] + "-USDT"
     return exchange_symbol.replace("_", "-").upper()
 
 
 def convert_to_exchange_symbol(hb_symbol: str) -> str:
     """
     Converts a Hummingbot symbol to exchange format
+    Crypto.com uses _USD for USDT pairs (e.g., "BTC-USDT" -> "BTC_USD")
     :param hb_symbol: symbol in Hummingbot format (e.g., "BTC-USDT")
-    :return: symbol in exchange format (e.g., "BTC_USDT")
+    :return: symbol in exchange format (e.g., "BTC_USD")
     """
+    # Crypto.com uses _USD instead of _USDT
+    if hb_symbol.endswith("-USDT"):
+        return hb_symbol[:-5].upper() + "_USD"
     return hb_symbol.replace("-", "_").upper()
 
 

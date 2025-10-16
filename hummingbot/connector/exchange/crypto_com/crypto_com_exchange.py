@@ -1,6 +1,6 @@
 import asyncio
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bidict import bidict
 
@@ -26,9 +26,6 @@ from hummingbot.core.data_type.trade_fee import DeductedFromReturnsTradeFee, Tok
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
-if TYPE_CHECKING:
-    from hummingbot.client.config.config_helpers import ClientConfigAdapter
-
 
 class CryptoComExchange(ExchangePyBase):
     UPDATE_ORDER_STATUS_MIN_INTERVAL = 10.0
@@ -36,9 +33,11 @@ class CryptoComExchange(ExchangePyBase):
     web_utils = web_utils
 
     def __init__(self,
-                 client_config_map: "ClientConfigAdapter",
                  crypto_com_api_key: str,
                  crypto_com_secret_key: str,
+                 client_config_map: Optional[Any] = None,
+                 balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None,
+                 rate_limits_share_pct: Decimal = Decimal("100"),
                  trading_pairs: Optional[List[str]] = None,
                  trading_required: bool = True,
                  domain: str = CONSTANTS.DEFAULT_DOMAIN,
@@ -469,6 +468,12 @@ class CryptoComExchange(ExchangePyBase):
                     currency = position.get("instrument_name", "").upper()
                     if currency:
                         quantity = Decimal(str(position.get("quantity", "0")))
+
+                        # Crypto.com uses "USD" but Hummingbot expects "USDT" for USDT pairs
+                        # Map USD -> USDT so balance checks work correctly
+                        if currency == "USD":
+                            currency = "USDT"
+
                         # For crypto.com, available balance might be the same as quantity
                         # unless there are specific locked amounts
                         self._account_balances[currency] = quantity
@@ -559,11 +564,28 @@ class CryptoComExchange(ExchangePyBase):
     def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: Dict[str, Any]):
         """
         Initialize trading pair symbol mapping from exchange info
+        Handles Crypto.com's dual format: both _USD and _USDT pairs for same asset
         """
         mapping = {}
+        all_symbols = set()
 
         if "result" in exchange_info and "data" in exchange_info["result"]:
             instruments = exchange_info["result"]["data"]
+
+            # First pass: collect all symbols to identify duplicates
+            for instrument in instruments:
+                if isinstance(instrument, dict) and "symbol" in instrument:
+                    exchange_symbol = instrument["symbol"]
+                    active = instrument.get("active")
+                    tradable = instrument.get("tradable")
+
+                    # Only skip if explicitly False
+                    if active is False or tradable is False:
+                        continue
+
+                    all_symbols.add(exchange_symbol)
+
+            # Second pass: build mapping, skipping _USDT pairs when _USD exists
             for instrument in instruments:
                 if isinstance(instrument, dict) and "symbol" in instrument:
                     exchange_symbol = instrument["symbol"]
@@ -572,15 +594,21 @@ class CryptoComExchange(ExchangePyBase):
                     if len(mapping) < 5:
                         self.logger().info(f"Processing instrument: {exchange_symbol}, active: {instrument.get('active')}, tradable: {instrument.get('tradable')}")
 
-                    # Be more lenient with active/tradable check - Crypto.com API might not return these fields consistently
                     active = instrument.get("active")
                     tradable = instrument.get("tradable")
 
-                    # Only skip if explicitly False, allow None, True, or missing fields
+                    # Only skip if explicitly False
                     if active is False or tradable is False:
-                        if len(mapping) < 10:  # Log first 10 skipped
-                            self.logger().debug(f"Skipping {exchange_symbol}: active={active}, tradable={tradable}")
                         continue
+
+                    # Skip _USDT pairs when corresponding _USD pair exists
+                    # Example: Skip BTC_USDT if BTC_USD exists (both convert to BTC-USDT)
+                    if exchange_symbol.endswith("_USDT"):
+                        base_with_usd = exchange_symbol[:-5] + "_USD"  # Replace _USDT with _USD
+                        if base_with_usd in all_symbols:
+                            if len(mapping) < 5:
+                                self.logger().debug(f"Skipping {exchange_symbol} - {base_with_usd} exists")
+                            continue
 
                     hb_symbol = crypto_com_utils.convert_from_exchange_symbol(exchange_symbol)
 
