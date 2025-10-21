@@ -2,7 +2,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.strategy_v2.executors.data_types import ExecutorConfigBase
@@ -30,8 +30,10 @@ class TWAPExecutorConfig(ExecutorConfigBase):
 
     @field_validator('limit_order_buffer', mode="before")
     @classmethod
-    def validate_limit_order_buffer(cls, v, values):
-        if v is None and values["mode"] == TWAPMode.MAKER:
+    def validate_limit_order_buffer(cls, v, info: ValidationInfo):
+        # In Pydantic v2, use info.data.get() to access other field values
+        mode = info.data.get("mode")
+        if v is None and mode == TWAPMode.MAKER:
             raise ValueError("limit_order_buffer is required for MAKER mode")
         return v
 

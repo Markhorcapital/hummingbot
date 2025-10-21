@@ -87,7 +87,10 @@ RATE_LIMITS = [
     RateLimit(limit_id=SERVER_TIME_PATH_URL, limit=100, time_interval=1),
     RateLimit(limit_id=CREATE_ORDER_PATH_URL, limit=15, time_interval=1),
     RateLimit(limit_id=CANCEL_ORDER_PATH_URL, limit=15, time_interval=1),
+    RateLimit(limit_id=CANCEL_ALL_ORDERS_PATH_URL, limit=15, time_interval=1),
     RateLimit(limit_id=GET_ORDER_HISTORY_PATH_URL, limit=100, time_interval=1),
+    RateLimit(limit_id=GET_ORDER_DETAIL_PATH_URL, limit=100, time_interval=1),
+    RateLimit(limit_id=GET_TRADES_PATH_URL, limit=100, time_interval=1),
     RateLimit(limit_id=ACCOUNT_SUMMARY_PATH_URL, limit=100, time_interval=1),
     RateLimit(limit_id=USER_BALANCE_PATH_URL, limit=100, time_interval=1),
 ]

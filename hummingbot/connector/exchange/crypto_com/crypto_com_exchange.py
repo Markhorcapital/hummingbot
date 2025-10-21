@@ -631,16 +631,16 @@ class CryptoComExchange(ExchangePyBase):
         try:
             # Ensure symbol map is initialized
             if not hasattr(self, '_trading_pair_symbol_map') or self._trading_pair_symbol_map is None:
-                self.logger().warning(f"Symbol map not initialized, using direct conversion for {trading_pair}")
+                self.logger().debug(f"Symbol map not initialized, using direct conversion for {trading_pair}")
                 return crypto_com_utils.convert_to_exchange_symbol(trading_pair)
 
             symbol_map = self._trading_pair_symbol_map
             if trading_pair in symbol_map.inverse:
                 return symbol_map.inverse[trading_pair]
             else:
-                # If not found, try to convert directly
+                # If not found, try to convert directly - this is normal for some pairs
                 exchange_symbol = crypto_com_utils.convert_to_exchange_symbol(trading_pair)
-                self.logger().warning(f"Trading pair {trading_pair} not found in symbol map, using direct conversion: {exchange_symbol}")
+                self.logger().debug(f"Trading pair {trading_pair} not found in symbol map, using direct conversion: {exchange_symbol}")
                 return exchange_symbol
         except Exception as e:
             self.logger().error(f"Error getting exchange symbol for {trading_pair}: {e}")

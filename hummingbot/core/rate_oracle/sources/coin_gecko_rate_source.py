@@ -79,13 +79,13 @@ class CoinGeckoRateSource(RateSourceBase):
                     return res
                 except IOError as e:
                     # This is from exceeding the server's rate limit, signal the issue and wait for post-ban cool-off
-                    self.logger().warning("Rate limit exceeded with:")
-                    self.logger().warning(f"   {e}")
-                    self.logger().warning("   Report to development team")
+                    # Using debug level since this is expected behavior with free tier and doesn't affect bot operation
+                    self.logger().debug("Rate limit exceeded with:")
+                    self.logger().debug(f"   {e}")
                     self._rate_limit_exceeded.set()
                     # This is the cool-off after a ban
                     await self._sleep(COOLOFF_AFTER_BAN)
-                    self.logger().info(f"   Continuing after {COOLOFF_AFTER_BAN} seconds")
+                    self.logger().debug(f"   Continuing after {COOLOFF_AFTER_BAN} seconds")
                     self._rate_limit_exceeded.clear()
                 except Exception as e:
                     self.logger().error(f"Unhandled error in CoinGecko rate source response: {str(e)}", exc_info=True)

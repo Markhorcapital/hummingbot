@@ -60,7 +60,7 @@ class TWAPExecutor(ExecutorBase):
         self.close_timestamp = self._strategy.current_timestamp
         self.stop()
 
-    def validate_sufficient_balance(self):
+    async def validate_sufficient_balance(self):
         mid_price = self.get_price(self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
         total_amount_base = self.config.total_amount_quote / mid_price
         if self.is_perpetual_connector(self.config.connector_name):
@@ -162,8 +162,13 @@ class TWAPExecutor(ExecutorBase):
         This method is responsible for processing the order failed event. Here we will check if the order id is one of
         the order plan and if it is we will move the order to the failed collection and retry with a new order.
         """
+        # Guard against None event
+        if event is None:
+            self.logger().warning("Received None event in process_order_failed_event, ignoring.")
+            return
+
         all_orders = self._order_plan.values()
-        active_order = next((order for order in all_orders if order.order_id == event.order_id), None)
+        active_order = next((order for order in all_orders if order and order.order_id == event.order_id), None)
         if active_order:
             self._failed_orders.append(active_order)
             self._order_plan = {timestamp: None for timestamp, order in self._order_plan.items() if order == active_order}
@@ -171,7 +176,7 @@ class TWAPExecutor(ExecutorBase):
 
     def update_tracked_orders_with_order_id(self, order_id: str):
         all_orders = self._order_plan.values()
-        active_order = next((order for order in all_orders if order.order_id == order_id), None)
+        active_order = next((order for order in all_orders if order and order.order_id == order_id), None)
         if active_order:
             in_flight_order = self.get_in_flight_order(self.config.connector_name, order_id)
             if in_flight_order:
@@ -186,7 +191,12 @@ class TWAPExecutor(ExecutorBase):
         of the order plan and if it is we will check if the rest of the orders are completed and if they are we will
         pass the executor to SHUTTING_DOWN state.
         """
-        active_order = next((order for order in self._order_plan.values() if order.order_id == event.order_id), None)
+        # Guard against None event
+        if event is None:
+            self.logger().warning("Received None event in process_order_completed_event, ignoring.")
+            return
+
+        active_order = next((order for order in self._order_plan.values() if order and order.order_id == event.order_id), None)
         if active_order:
             self.evaluate_all_orders_completed()
 
