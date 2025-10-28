@@ -230,6 +230,7 @@ class CryptoComAPIOrderBookDataSource(OrderBookTrackerDataSource):
         """
         Listen for trades using websocket trade channel
         """
+        ws = None
         while True:
             try:
                 ws: WSAssistant = await self._connected_websocket_assistant()
@@ -248,11 +249,16 @@ class CryptoComAPIOrderBookDataSource(OrderBookTrackerDataSource):
                     exc_info=True
                 )
                 await self._sleep(30.0)
+            finally:
+                # ✅ CRITICAL FIX: Always cleanup WebSocket connection
+                ws and await ws.disconnect()
+                await self._sleep(30.0)
 
     async def listen_for_order_book_diffs(self, ev_loop: asyncio.AbstractEventLoop, output: asyncio.Queue):
         """
         Listen for order book diffs using websocket order book channel
         """
+        ws = None
         while True:
             try:
                 ws: WSAssistant = await self._connected_websocket_assistant()
@@ -270,6 +276,10 @@ class CryptoComAPIOrderBookDataSource(OrderBookTrackerDataSource):
                     "Unexpected error with WebSocket connection. Retrying after 30 seconds...",
                     exc_info=True
                 )
+                await self._sleep(30.0)
+            finally:
+                # ✅ CRITICAL FIX: Always cleanup WebSocket connection
+                ws and await ws.disconnect()
                 await self._sleep(30.0)
 
     async def listen_for_order_book_snapshots(self, ev_loop: asyncio.AbstractEventLoop, output: asyncio.Queue):

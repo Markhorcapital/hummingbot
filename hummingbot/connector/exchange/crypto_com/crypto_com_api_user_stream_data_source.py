@@ -95,6 +95,7 @@ class CryptoComAPIUserStreamDataSource(UserStreamTrackerDataSource):
         """
         Listen for user stream data from Crypto.com WebSocket
         """
+        ws = None
         while True:
             try:
                 ws: WSAssistant = await self._connected_websocket_assistant()
@@ -122,6 +123,10 @@ class CryptoComAPIUserStreamDataSource(UserStreamTrackerDataSource):
                     "Unexpected error while listening for user stream. Retrying after 30 seconds...",
                     exc_info=True
                 )
+                await self._sleep(30.0)
+            finally:
+                # ✅ CRITICAL FIX: Always cleanup WebSocket connection
+                ws and await ws.disconnect()
                 await self._sleep(30.0)
 
     async def _process_websocket_message(self, message: dict, output: asyncio.Queue):

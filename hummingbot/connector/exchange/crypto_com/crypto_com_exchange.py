@@ -196,7 +196,15 @@ class CryptoComExchange(ExchangePyBase):
         Calculate the fee for a trade based on Crypto.com's fee structure
         """
         is_maker = is_maker or (order_type is OrderType.LIMIT_MAKER)
-        fee_schema = self.trade_fee_schema()
+
+        try:
+            fee_schema = self.trade_fee_schema()
+            if fee_schema is None:
+                raise Exception("Fee schema is None")
+        except Exception:
+            # Fallback to default fees if trade_fee_schema fails
+            from hummingbot.connector.exchange.crypto_com.crypto_com_utils import DEFAULT_FEES
+            fee_schema = DEFAULT_FEES
 
         if is_maker:
             fee_percent = fee_schema.maker_percent_fee_decimal
@@ -259,7 +267,6 @@ class CryptoComExchange(ExchangePyBase):
         params["client_oid"] = order_id
 
         # Log the formatted values for debugging
-        self.logger().info(f"Placing order for {trading_pair}: quantity='{quantity_str}', price='{params.get('price', 'N/A')}'")
 
         # Structure exactly like working script
         data = {
@@ -481,32 +488,37 @@ class CryptoComExchange(ExchangePyBase):
 
     async def _all_trade_updates_for_order(self, order: InFlightOrder) -> List[TradeUpdate]:
         """
-        Get all trade updates for a specific order
+        Get all trade updates for a specific order using private/get-order-detail API
         """
         trade_updates = []
 
         try:
             data = {
-                "method": "private/get-trades",
+                "method": "private/get-order-detail",
                 "params": {
-                    "instrument_name": await self.exchange_symbol_associated_to_pair(order.trading_pair),
                     "order_id": order.exchange_order_id
                 }
             }
 
             response = await self._api_post(
-                path_url=CONSTANTS.GET_TRADES_PATH_URL,
+                path_url=CONSTANTS.GET_ORDER_DETAIL_PATH_URL,
                 data=data,
                 is_auth_required=True,
-                limit_id=CONSTANTS.GET_TRADES_PATH_URL
+                limit_id=CONSTANTS.GET_ORDER_DETAIL_PATH_URL
             )
 
             if response.get("code") == 0 and "result" in response:
-                trades = response["result"].get("data", [])
+                order_detail = response["result"]
 
-                for trade in trades:
+                # Extract order details
+                quantity = Decimal(order_detail.get("quantity", "0"))
+                cumulative_quantity = Decimal(order_detail.get("cumulative_quantity", "0"))
+                limit_price = Decimal(order_detail.get("limit_price", "0"))
+
+                # Only add trade update if quantity and cumulative_quantity are the same (order is filled)
+                if quantity == cumulative_quantity and quantity > 0:
                     trade_update = TradeUpdate(
-                        trade_id=trade["trade_id"],
+                        trade_id=order_detail["order_id"],  # Use order_id as trade_id
                         client_order_id=order.client_order_id,
                         exchange_order_id=order.exchange_order_id,
                         trading_pair=order.trading_pair,
@@ -515,14 +527,15 @@ class CryptoComExchange(ExchangePyBase):
                             quote_currency=order.quote_asset,
                             order_type=order.order_type,
                             order_side=order.trade_type,
-                            amount=Decimal(trade["quantity"]),
-                            price=Decimal(trade["price"])
+                            amount=quantity,
+                            price=limit_price
                         ),
-                        fill_base_amount=Decimal(trade["quantity"]),
-                        fill_quote_amount=Decimal(trade["quantity"]) * Decimal(trade["price"]),
-                        fill_price=Decimal(trade["price"]),
-                        fill_timestamp=trade["create_time"] / 1000,
+                        fill_base_amount=quantity,
+                        fill_quote_amount=quantity * limit_price,
+                        fill_price=limit_price,
+                        fill_timestamp=order_detail.get("create_time", 0) / 1000,
                     )
+
                     trade_updates.append(trade_update)
         except Exception:
             pass
@@ -590,10 +603,6 @@ class CryptoComExchange(ExchangePyBase):
                 if isinstance(instrument, dict) and "symbol" in instrument:
                     exchange_symbol = instrument["symbol"]
 
-                    # Log first few instruments for debugging
-                    if len(mapping) < 5:
-                        self.logger().info(f"Processing instrument: {exchange_symbol}, active: {instrument.get('active')}, tradable: {instrument.get('tradable')}")
-
                     active = instrument.get("active")
                     tradable = instrument.get("tradable")
 
@@ -606,8 +615,6 @@ class CryptoComExchange(ExchangePyBase):
                     if exchange_symbol.endswith("_USDT"):
                         base_with_usd = exchange_symbol[:-5] + "_USD"  # Replace _USDT with _USD
                         if base_with_usd in all_symbols:
-                            if len(mapping) < 5:
-                                self.logger().debug(f"Skipping {exchange_symbol} - {base_with_usd} exists")
                             continue
 
                     hb_symbol = crypto_com_utils.convert_from_exchange_symbol(exchange_symbol)
@@ -615,11 +622,6 @@ class CryptoComExchange(ExchangePyBase):
                     # Validate trading pair format
                     if "-" in hb_symbol and hb_symbol.count("-") == 1:
                         mapping[exchange_symbol] = hb_symbol
-                        if len(mapping) <= 10:  # Log first 10 successful mappings
-                            self.logger().info(f"Successfully mapped {exchange_symbol} -> {hb_symbol}")
-                    else:
-                        if len(mapping) < 5:  # Log first 5 invalid formats
-                            self.logger().debug(f"Skipping invalid symbol mapping: {exchange_symbol} -> {hb_symbol}")
 
         self.logger().info(f"Initialized {len(mapping)} trading pair symbol mappings")
         self._set_trading_pair_symbol_map(bidict(mapping))
@@ -640,7 +642,6 @@ class CryptoComExchange(ExchangePyBase):
             else:
                 # If not found, try to convert directly
                 exchange_symbol = crypto_com_utils.convert_to_exchange_symbol(trading_pair)
-                self.logger().warning(f"Trading pair {trading_pair} not found in symbol map, using direct conversion: {exchange_symbol}")
                 return exchange_symbol
         except Exception as e:
             self.logger().error(f"Error getting exchange symbol for {trading_pair}: {e}")
