@@ -23,14 +23,13 @@ handlers:
         formatter: simple
         stream: ext://sys.stdout
     file_handler:
-        class: logging.handlers.TimedRotatingFileHandler
+        class: logging.handlers.RotatingFileHandler
         level: DEBUG
         formatter: simple
         filename: $PROJECT_DIR/logs/logs_$STRATEGY_FILE_PATH.log
         encoding: utf8
-        when: "D"
-        interval: 1
-        backupCount: 7
+        maxBytes: 104857600
+        backupCount: 2
     "null":
         class: logging.NullHandler
         level: DEBUG
