@@ -1,6 +1,6 @@
 ---
 version: 1
-template_version: 12
+template_version: 13
 
 formatters:
     simple:
