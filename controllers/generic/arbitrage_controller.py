@@ -73,7 +73,11 @@ class ArbitrageController(ControllerBase):
             self.market_data_provider.initialize_rate_sources(rates_required)
 
     def get_gas_token(self, connector_name: str) -> str:
-        _, chain, _ = connector_name.split("_")
+        if "quickswap/clmm_ethereum_polygon" in connector_name:
+            chain = "polygon"
+        else:
+            # Fallback to original logic for other connector formats
+            _, chain, _ = connector_name.split("_")
         return self.gas_token_by_network[chain]
 
     async def update_processed_data(self):

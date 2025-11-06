@@ -5,7 +5,9 @@ from typing import Dict, Union
 
 from hummingbot.connector.utils import split_hb_trading_pair
 from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.data_type.trade_fee import TokenAmount
 from hummingbot.core.event.events import BuyOrderCreatedEvent, MarketOrderFailureEvent, SellOrderCreatedEvent
+from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
 from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
@@ -225,6 +227,7 @@ class ArbitrageExecutor(ExecutorBase):
             is_buy=False,
             order_amount=self.order_amount,
             asset=base_without_wrapped)
+        # self.logger().info(f"sell_fee: {sell_fee}")
         self._last_buy_fee = buy_fee
         self._last_sell_fee = sell_fee
         self._last_tx_cost = self._last_buy_fee + self._last_sell_fee
@@ -277,8 +280,58 @@ class ArbitrageExecutor(ExecutorBase):
         connector = self.connectors[exchange]
         price = await self.get_resulting_price_for_amount(exchange, trading_pair, is_buy, order_amount)
         if self.is_amm_connector(exchange=exchange):
-            gas_cost = connector.network_transaction_fee
-            return gas_cost.amount / self.config.gas_conversion_price
+            # Get chain name from connector
+            chain = connector.chain
+            # self.logger().info(f"Fetching gas estimate for chain: {chain}, network: {connector.network}")
+            
+            try:
+                # Call estimate_gas API directly
+                gateway_instance = GatewayHttpClient.get_instance()
+                gas_response = await gateway_instance.estimate_gas(
+                    chain=chain,
+                    network=connector.network,
+                    gas_limit=300000
+                )
+                # self.logger().info(f"Gas estimate response: {gas_response}")
+                
+                # Extract gas price token and cost from response
+                gas_price_token = gas_response.get("gasPriceToken")
+                gas_cost_value = gas_response.get("gasCost")
+                
+                # self.logger().info(f"Gas price token: {gas_price_token}, Gas cost value: {gas_cost_value}")
+                
+                # Use the response to get gas cost
+                gas_cost = TokenAmount(
+                    token=gas_price_token, 
+                    amount=Decimal(str(gas_cost_value))
+                )
+                # self.logger().info(f"Calculated gas_cost from API: {gas_cost}")
+                
+                # Calculate gas_conversion_price dynamically
+                # Get the base asset from trading pair (e.g., ALI from ALI-WPOL)
+                base_asset = trading_pair.split("-")[0]
+                # Create conversion pair (e.g., ALI-POL)
+                conversion_pair = f"{base_asset}-{gas_price_token}"
+                # self.logger().info(f"Calculating gas conversion rate for pair: {conversion_pair}")
+                
+                # Get the conversion rate from rate oracle
+                gas_conversion_price = self.rate_oracle.get_pair_rate(conversion_pair)
+                # self.logger().info(f"Gas conversion price ({conversion_pair}): {gas_conversion_price}")
+                
+                # self.logger().info(f"Gas cost amount: {gas_cost.amount}, conversion price: {gas_conversion_price}")
+                
+                result = gas_cost.amount / gas_conversion_price
+                # self.logger().info(f"Final gas cost in {base_asset}: {result}")
+                return result
+            except Exception as e:
+                self.logger().error(f"Error getting gas estimate from API: {e}", exc_info=True)
+                # Fallback to connector's cached network_transaction_fee and static conversion price
+                if connector.network_transaction_fee is not None and self.config.gas_conversion_price is not None:
+                    self.logger().info(f"Using fallback: connector.network_transaction_fee = {connector.network_transaction_fee}")
+                    self.logger().info(f"Using static gas_conversion_price from config: {self.config.gas_conversion_price}")
+                    return connector.network_transaction_fee.amount / self.config.gas_conversion_price
+                else:
+                    raise Exception(f"Could not get gas estimate and no fallback available: {e}")
         else:
             fee = connector.get_fee(
                 base_currency=asset,
@@ -289,6 +342,7 @@ class ArbitrageExecutor(ExecutorBase):
                 price=price,
                 is_maker=False
             )
+            self.logger().info(f"fee: {fee}")
             return fee.fee_amount_in_token(
                 trading_pair=trading_pair,
                 price=price,

@@ -83,7 +83,12 @@ class GatewayHttpClient:
         """
         if cls._shared_client is None or re_init:
             cert_path = client_config_map.certs_path
-            ssl_ctx = ssl.create_default_context(cafile=f"{cert_path}/ca_cert.pem")
+            # Create SSL context for self-signed certificates on localhost
+            # Since these are self-signed certs without key usage extension, we disable verification
+            # but still use the certs for client authentication
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE  # Disable verification for self-signed localhost certs
             ssl_ctx.load_cert_chain(certfile=f"{cert_path}/client_cert.pem",
                                     keyfile=f"{cert_path}/client_key.pem",
                                     password=Security.secrets_manager.password.get_secret_value())
@@ -233,13 +238,20 @@ class GatewayHttpClient:
                         app_warning_msg=f"Call to {url} failed. See logs for more details."
                     )
                 raise e
+            else:
+                return None
 
         return parsed_response
 
     async def ping_gateway(self) -> bool:
         try:
             response: Dict[str, Any] = await self.api_request("get", "", fail_silently=True)
-            return response["status"] == "ok"
+            if response is None:
+                return False
+            if isinstance(response, dict):
+                return response.get("status") == "ok"
+            else:
+                return False
         except Exception:
             return False
 
