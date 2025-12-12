@@ -109,7 +109,9 @@ class TWAPMultiplePairs(StrategyV2Base):
         self.check_all_executors_completed()
 
     def check_all_executors_completed(self):
-        all_executors = self.get_all_executors()
-        if len(all_executors) > 0 and all([executor.is_done for executor in self.get_all_executors()]):
-            self.logger().info("All TWAP executors have been completed.")
-            HummingbotApplication.main_application().stop()
+        # Don't stop the application - let executors loop continuously
+        # all_executors = self.get_all_executors()
+        # if len(all_executors) > 0 and all([executor.is_done for executor in self.get_all_executors()]):
+        #     self.logger().info("All TWAP executors have been completed.")
+        #     HummingbotApplication.main_application().stop()
+        pass

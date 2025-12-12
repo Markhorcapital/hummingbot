@@ -1,0 +1,181 @@
+# Volume Bot Executor Configuration File
+# Based on TWAP Strategy Architecture - Reuses same patterns and structure
+
+# =============================================================================
+# REQUIRED PARAMETERS
+# =============================================================================
+
+# Executor type - must be "volume_bot_executor"
+type: "volume_bot_executor"
+
+# Exchange connector name (e.g., "binance", "binance_perpetual")
+connector_name: "binance"
+
+# Trading pair in format: BASE-QUOTE (e.g., "BTC-USDT", "ETH-USDT")
+trading_pair: "BTC-USDT"
+
+# Trade amount per order in QUOTE currency
+trade_amount_quote: 100.0
+
+# Batch sizes for buy and sell operations
+buy_batch_size: 3
+sell_batch_size: 3
+
+# Timing intervals (in seconds)
+interval_between_buys: 5        # Seconds between individual buy orders
+interval_between_sells: 5       # Seconds between individual sell orders
+interval_between_cycles: 10     # Seconds between buy→sell cycles
+
+# =============================================================================
+# OPTIONAL PARAMETERS
+# =============================================================================
+
+# Execution mode: "FIXED", "VARIABLE", "TIME_BASED", "VOLUME_TARGET"
+mode: "FIXED"
+
+# Leverage for perpetual futures (default: 1)
+leverage: 1
+
+# Order type: "MARKET" or "LIMIT" (default: "MARKET")
+order_type: "MARKET"
+
+# Limit order buffer (required if order_type is "LIMIT")
+limit_order_buffer: null  # e.g., 0.001 for 0.1% buffer
+
+# =============================================================================
+# MODE-SPECIFIC PARAMETERS
+# =============================================================================
+
+# VARIABLE Mode Parameters
+min_batch_size: null  # Required for VARIABLE mode
+max_batch_size: null  # Required for VARIABLE mode
+randomize: false       # Randomize batch sizes within min/max
+
+# TIME_BASED Mode Parameters
+buys_per_hour: null    # Required for TIME_BASED mode
+maintain_balance: true # Maintain buy/sell balance
+
+# VOLUME_TARGET Mode Parameters
+daily_volume_target: null  # Required for VOLUME_TARGET mode (in quote currency)
+
+# =============================================================================
+# EXAMPLE CONFIGURATIONS
+# =============================================================================
+
+# Example 1: Fixed Batch Mode (Default)
+# ---
+# type: "volume_bot_executor"
+# connector_name: "binance"
+# trading_pair: "BTC-USDT"
+# trade_amount_quote: 100.0
+# buy_batch_size: 3
+# sell_batch_size: 3
+# interval_between_buys: 5
+# interval_between_sells: 5
+# interval_between_cycles: 10
+# mode: "FIXED"
+# order_type: "MARKET"
+# 
+# This will:
+# - Execute 3 buy orders (every 5 seconds)
+# - Wait 10 seconds
+# - Execute 3 sell orders (every 5 seconds)
+# - Repeat cycle
+# - Total volume per cycle: 600 USDT (3 buys + 3 sells × 100 USDT)
+
+# Example 2: Variable Batch Mode with Randomization
+# ---
+# type: "volume_bot_executor"
+# connector_name: "binance"
+# trading_pair: "ETH-USDT"
+# trade_amount_quote: 50.0
+# min_batch_size: 2
+# max_batch_size: 5
+# randomize: true
+# interval_between_buys: 3
+# interval_between_sells: 3
+# interval_between_cycles: 8
+# mode: "VARIABLE"
+# order_type: "MARKET"
+# 
+# This will:
+# - Randomly select batch size between 2-5 for each cycle
+# - Execute buys, then sells with same batch size
+# - Creates more natural trading patterns
+
+# Example 3: Maker Mode (Limit Orders)
+# ---
+# type: "volume_bot_executor"
+# connector_name: "binance"
+# trading_pair: "BTC-USDT"
+# trade_amount_quote: 200.0
+# buy_batch_size: 2
+# sell_batch_size: 2
+# interval_between_buys: 10
+# interval_between_sells: 10
+# interval_between_cycles: 20
+# mode: "FIXED"
+# order_type: "LIMIT"
+# limit_order_buffer: 0.001  # 0.1% buffer
+# 
+# This will:
+# - Place limit orders 0.1% below mid price (buys)
+# - Place limit orders 0.1% above mid price (sells)
+# - Earn maker fees on filled orders
+
+# Example 4: Time-Based Mode
+# ---
+# type: "volume_bot_executor"
+# connector_name: "binance"
+# trading_pair: "BTC-USDT"
+# trade_amount_quote: 100.0
+# buys_per_hour: 20
+# maintain_balance: true
+# mode: "TIME_BASED"
+# order_type: "MARKET"
+# 
+# This will:
+# - Execute approximately 20 buy/sell pairs per hour
+# - Maintain balanced buy/sell ratio
+# - Adjust timing automatically
+
+# Example 5: Volume Target Mode
+# ---
+# type: "volume_bot_executor"
+# connector_name: "binance"
+# trading_pair: "BTC-USDT"
+# trade_amount_quote: 100.0
+# daily_volume_target: 10000.0
+# maintain_balance: true
+# mode: "VOLUME_TARGET"
+# order_type: "MARKET"
+# 
+# This will:
+# - Target 10,000 USDT in daily volume
+# - Automatically adjust execution rate
+# - Maintain balanced trading
+
+# =============================================================================
+# ARCHITECTURE NOTES
+# =============================================================================
+# 
+# This executor follows the same architecture as TWAPExecutor:
+# 
+# 1. Inherits from ExecutorBase (same base class as TWAP)
+# 2. Uses same event handling system
+# 3. Follows same lifecycle: RUNNING → SHUTTING_DOWN → TERMINATED
+# 4. Reuses same error handling and retry mechanisms
+# 5. Uses same logging format and levels
+# 6. Follows same configuration structure (Pydantic models)
+# 
+# Key Differences from TWAP:
+# - TWAP: One direction (all buys OR all sells), time-weighted
+# - Volume Bot: Both directions (buys AND sells), balanced batches
+# 
+# Key Similarities:
+# - Same executor pattern
+# - Same event handlers
+# - Same state management approach
+# - Same error recovery mechanisms
+# - Same performance metrics structure
+

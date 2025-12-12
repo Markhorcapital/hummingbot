@@ -1,0 +1,174 @@
+# TWAP Executor Configuration File
+# This file contains all parameters required for the TWAP (Time-Weighted Average Price) executor
+# 
+# Documentation:
+# - TWAP splits large orders into smaller orders placed at regular intervals
+# - TAKER mode: Uses MARKET orders (executes immediately)
+# - MAKER mode: Uses LIMIT orders (may take time to fill, can earn maker fees)
+
+# =============================================================================
+# REQUIRED PARAMETERS (Base Configuration)
+# =============================================================================
+
+# Executor type - must be "twap_executor"
+type: "twap_executor"
+
+# Exchange connector name (e.g., "binance", "binance_perpetual", "coinbase_pro")
+# Must match a configured connector in your hummingbot setup
+connector_name: "binance"
+
+# Trading pair in format: BASE-QUOTE (e.g., "BTC-USDT", "ETH-USDT")
+trading_pair: "BTC-USDT"
+
+# Trade side: "BUY" or "SELL"
+# - BUY: Purchase the base asset using quote asset
+# - SELL: Sell the base asset for quote asset
+side: "BUY"  # Options: "BUY" or "SELL"
+
+# Total amount to trade in QUOTE currency (e.g., if trading BTC-USDT, this is in USDT)
+# Example: 1000 means 1000 USDT worth of BTC will be purchased
+total_amount_quote: 1000.0
+
+# Total duration for TWAP execution in SECONDS
+# Example: 3600 = 1 hour, 1800 = 30 minutes, 300 = 5 minutes
+total_duration: 3600
+
+# Interval between orders in SECONDS
+# Example: 60 = place an order every 60 seconds
+# Note: Number of orders = (total_duration // order_interval) + 1
+order_interval: 60
+
+# =============================================================================
+# OPTIONAL PARAMETERS (Base Configuration)
+# =============================================================================
+
+# Leverage for perpetual futures (default: 1)
+# - For spot trading: use 1
+# - For perpetual futures: can be 1, 2, 3, 5, 10, 20, etc. (depends on exchange)
+leverage: 1
+
+# Execution mode: "TAKER" or "MAKER" (default: "TAKER")
+# - TAKER: Uses MARKET orders, executes immediately, pays taker fees
+# - MAKER: Uses LIMIT orders, may take time to fill, can earn maker fees (beta)
+mode: "TAKER"  # Options: "TAKER" or "MAKER"
+
+# Executor ID (optional - auto-generated if not provided)
+# Format: base58 encoded hash
+id: null
+
+# Timestamp for executor start (optional - uses current time if not provided)
+# Unix timestamp in seconds
+timestamp: null
+
+# Controller ID (optional - defaults to "main")
+# Used when executors are managed by controllers
+controller_id: "main"
+
+# =============================================================================
+# MAKER MODE SPECIFIC PARAMETERS
+# =============================================================================
+# These parameters are ONLY required when mode is set to "MAKER"
+# If mode is "TAKER", these can be omitted or set to null
+
+# Price buffer for limit orders (REQUIRED if mode is "MAKER")
+# Decimal value representing price offset from mid price
+# - For BUY orders: price = mid_price * (1 - limit_order_buffer)
+# - For SELL orders: price = mid_price * (1 + limit_order_buffer)
+# Example: 0.001 = 0.1% buffer, 0.01 = 1% buffer
+limit_order_buffer: null  # Required for MAKER mode, e.g., 0.001
+
+# Order resubmission time in SECONDS (optional, only for MAKER mode)
+# If a limit order is not filled within this time, it will be cancelled and resubmitted
+# Example: 300 = resubmit orders that haven't filled in 5 minutes
+order_resubmission_time: null  # Optional, e.g., 300
+
+# =============================================================================
+# EXAMPLE CONFIGURATIONS
+# =============================================================================
+
+# Example 1: TAKER Mode (Simple Market Orders)
+# ---
+# type: "twap_executor"
+# connector_name: "binance"
+# trading_pair: "BTC-USDT"
+# side: "BUY"
+# total_amount_quote: 1000.0
+# total_duration: 3600
+# order_interval: 60
+# mode: "TAKER"
+# leverage: 1
+# 
+# This will:
+# - Buy $1000 worth of BTC over 1 hour
+# - Place a market order every 60 seconds
+# - Total orders: (3600 // 60) + 1 = 61 orders
+# - Each order: ~$16.39 worth of BTC
+
+# Example 2: MAKER Mode (Limit Orders with Buffer)
+# ---
+# type: "twap_executor"
+# connector_name: "binance"
+# trading_pair: "ETH-USDT"
+# side: "SELL"
+# total_amount_quote: 5000.0
+# total_duration: 1800
+# order_interval: 30
+# mode: "MAKER"
+# limit_order_buffer: 0.002  # 0.2% above mid price for SELL
+# order_resubmission_time: 300  # Resubmit after 5 minutes if not filled
+# leverage: 1
+# 
+# This will:
+# - Sell $5000 worth of ETH over 30 minutes
+# - Place limit orders 0.2% above mid price every 30 seconds
+# - Total orders: (1800 // 30) + 1 = 61 orders
+# - Each order: ~$81.97 worth of ETH
+# - Orders will be resubmitted if not filled within 5 minutes
+
+# Example 3: Perpetual Futures with Leverage
+# ---
+# type: "twap_executor"
+# connector_name: "binance_perpetual"
+# trading_pair: "BTC-USDT"
+# side: "BUY"
+# total_amount_quote: 10000.0
+# total_duration: 7200
+# order_interval: 120
+# mode: "TAKER"
+# leverage: 5  # 5x leverage
+# 
+# This will:
+# - Open a long position worth $10,000 with 5x leverage
+# - Place market orders every 2 minutes over 2 hours
+# - Total orders: (7200 // 120) + 1 = 61 orders
+
+# =============================================================================
+# CALCULATION NOTES
+# =============================================================================
+# 
+# Number of orders = (total_duration // order_interval) + 1
+# Order amount per order = total_amount_quote / number_of_orders
+# 
+# Example:
+# - total_duration: 3600 seconds (1 hour)
+# - order_interval: 60 seconds
+# - number_of_orders: (3600 // 60) + 1 = 61 orders
+# - total_amount_quote: 1000 USDT
+# - order_amount_quote: 1000 / 61 ≈ 16.39 USDT per order
+# 
+# IMPORTANT:
+# - Each order amount must be >= exchange minimum order size
+# - If order_amount_quote < min_order_size, executor will fail
+# - Adjust total_amount_quote or order_interval if orders are too small
+
+# =============================================================================
+# VALIDATION RULES
+# =============================================================================
+# 
+# 1. If mode is "MAKER", limit_order_buffer is REQUIRED
+# 2. order_amount_quote must be >= exchange minimum order size
+# 3. side must be either "BUY" or "SELL"
+# 4. mode must be either "TAKER" or "MAKER"
+# 5. total_duration must be >= order_interval
+# 6. For perpetual connectors, leverage must be a valid value for that exchange
+

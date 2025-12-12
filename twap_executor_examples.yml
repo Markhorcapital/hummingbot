@@ -1,0 +1,165 @@
+# TWAP Executor - Ready-to-Use Configuration Examples
+# Copy and modify these examples for your use case
+
+# =============================================================================
+# EXAMPLE 1: Simple TAKER Mode (Market Orders) - Buy BTC
+# =============================================================================
+twap_buy_btc_taker:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "BTC-USDT"
+  side: "BUY"
+  total_amount_quote: 1000.0
+  total_duration: 3600      # 1 hour
+  order_interval: 60        # 1 order per minute
+  mode: "TAKER"
+  leverage: 1
+
+# Result: Buys $1000 worth of BTC over 1 hour, 61 market orders
+
+# =============================================================================
+# EXAMPLE 2: Simple TAKER Mode (Market Orders) - Sell ETH
+# =============================================================================
+twap_sell_eth_taker:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "ETH-USDT"
+  side: "SELL"
+  total_amount_quote: 500.0
+  total_duration: 1800      # 30 minutes
+  order_interval: 30        # 1 order every 30 seconds
+  mode: "TAKER"
+  leverage: 1
+
+# Result: Sells $500 worth of ETH over 30 minutes, 61 market orders
+
+# =============================================================================
+# EXAMPLE 3: MAKER Mode (Limit Orders) - Buy with Price Buffer
+# =============================================================================
+twap_buy_btc_maker:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "BTC-USDT"
+  side: "BUY"
+  total_amount_quote: 2000.0
+  total_duration: 7200      # 2 hours
+  order_interval: 120       # 1 order every 2 minutes
+  mode: "MAKER"
+  limit_order_buffer: 0.001  # 0.1% below mid price
+  order_resubmission_time: 300  # Resubmit after 5 minutes
+  leverage: 1
+
+# Result: Buys $2000 worth of BTC over 2 hours using limit orders
+# Orders placed 0.1% below mid price, resubmitted if not filled in 5 min
+
+# =============================================================================
+# EXAMPLE 4: MAKER Mode (Limit Orders) - Sell with Price Buffer
+# =============================================================================
+twap_sell_eth_maker:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "ETH-USDT"
+  side: "SELL"
+  total_amount_quote: 3000.0
+  total_duration: 5400      # 1.5 hours
+  order_interval: 90        # 1 order every 90 seconds
+  mode: "MAKER"
+  limit_order_buffer: 0.002  # 0.2% above mid price
+  order_resubmission_time: 600  # Resubmit after 10 minutes
+  leverage: 1
+
+# Result: Sells $3000 worth of ETH over 1.5 hours using limit orders
+# Orders placed 0.2% above mid price, resubmitted if not filled in 10 min
+
+# =============================================================================
+# EXAMPLE 5: Perpetual Futures - Long Position with Leverage
+# =============================================================================
+twap_perpetual_long:
+  type: "twap_executor"
+  connector_name: "binance_perpetual"
+  trading_pair: "BTC-USDT"
+  side: "BUY"
+  total_amount_quote: 10000.0
+  total_duration: 3600      # 1 hour
+  order_interval: 60        # 1 order per minute
+  mode: "TAKER"
+  leverage: 5               # 5x leverage
+
+# Result: Opens long position worth $10,000 with 5x leverage
+# Total position value: $50,000 (with 5x leverage)
+
+# =============================================================================
+# EXAMPLE 6: Perpetual Futures - Short Position with Leverage
+# =============================================================================
+twap_perpetual_short:
+  type: "twap_executor"
+  connector_name: "binance_perpetual"
+  trading_pair: "ETH-USDT"
+  side: "SELL"
+  total_amount_quote: 5000.0
+  total_duration: 1800      # 30 minutes
+  order_interval: 30        # 1 order every 30 seconds
+  mode: "TAKER"
+  leverage: 3               # 3x leverage
+
+# Result: Opens short position worth $5,000 with 3x leverage
+# Total position value: $15,000 (with 3x leverage)
+
+# =============================================================================
+# EXAMPLE 7: Fast Execution - High Frequency Orders
+# =============================================================================
+twap_fast_execution:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "BTC-USDT"
+  side: "BUY"
+  total_amount_quote: 500.0
+  total_duration: 300       # 5 minutes
+  order_interval: 10        # 1 order every 10 seconds
+  mode: "TAKER"
+  leverage: 1
+
+# Result: Buys $500 worth of BTC in 5 minutes, 31 market orders
+# Warning: Make sure each order meets minimum order size requirements
+
+# =============================================================================
+# EXAMPLE 8: Slow Execution - Low Frequency Orders
+# =============================================================================
+twap_slow_execution:
+  type: "twap_executor"
+  connector_name: "binance"
+  trading_pair: "BTC-USDT"
+  side: "BUY"
+  total_amount_quote: 5000.0
+  total_duration: 86400     # 24 hours
+  order_interval: 3600      # 1 order per hour
+  mode: "TAKER"
+  leverage: 1
+
+# Result: Buys $5000 worth of BTC over 24 hours, 25 market orders
+# Each order: ~$200 worth of BTC
+
+# =============================================================================
+# PARAMETER REFERENCE
+# =============================================================================
+#
+# REQUIRED PARAMETERS:
+#   - type: "twap_executor" (fixed)
+#   - connector_name: Exchange name (string)
+#   - trading_pair: "BASE-QUOTE" format (string)
+#   - side: "BUY" or "SELL" (string)
+#   - total_amount_quote: Amount in quote currency (decimal)
+#   - total_duration: Duration in seconds (integer)
+#   - order_interval: Interval between orders in seconds (integer)
+#
+# OPTIONAL PARAMETERS:
+#   - mode: "TAKER" (default) or "MAKER" (string)
+#   - leverage: 1 (default) for spot, 1-125 for perpetuals (integer)
+#   - id: Auto-generated if not provided (string)
+#   - timestamp: Current time if not provided (float)
+#   - controller_id: "main" (default) (string)
+#
+# MAKER MODE ONLY (Required when mode is "MAKER"):
+#   - limit_order_buffer: Price offset from mid price (decimal, e.g., 0.001)
+#   - order_resubmission_time: Resubmit time in seconds (integer, optional)
+

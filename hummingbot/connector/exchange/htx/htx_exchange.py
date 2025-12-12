@@ -1,5 +1,5 @@
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import TYPE_CHECKING, Any, AsyncIterable, Dict, List, Optional
 
 from bidict import bidict
@@ -14,7 +14,7 @@ from hummingbot.connector.exchange.htx.htx_utils import is_exchange_information_
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import combine_to_hb_trading_pair
-from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeBase
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
@@ -403,9 +403,31 @@ class HtxExchange(ExchangePyBase):
         if not self._account_id:
             await self._update_account_id()
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
+        
+        # HTX API requires amount in quote currency for market buy orders
+        # For market buy orders, amount is in base currency, need to convert to quote
+        order_amount = amount
+        if order_type_str == "market" and trade_type == TradeType.BUY:
+            # For market buy orders, HTX expects amount in quote currency
+            # If price is NaN, get current market price
+            if price.is_nan():
+                price = self.get_price_by_type(trading_pair, PriceType.MidPrice)
+            order_amount = amount * price
+            # Quantize quote amount to required precision (HTX requires 8 decimal places for quote amounts)
+            if trading_pair in self._trading_rules:
+                quote_increment = self._trading_rules[trading_pair].min_quote_amount_increment
+                if quote_increment > Decimal("0"):
+                    order_amount = order_amount.quantize(quote_increment, rounding=ROUND_DOWN)
+                else:
+                    # Fallback to 8 decimal places if trading rule not available
+                    order_amount = order_amount.quantize(Decimal("1e-8"), rounding=ROUND_DOWN)
+            else:
+                # Fallback to 8 decimal places if trading rules not loaded
+                order_amount = order_amount.quantize(Decimal("1e-8"), rounding=ROUND_DOWN)
+        
         params = {
             "account-id": self._account_id,
-            "amount": f"{amount}",
+            "amount": f"{order_amount}",
             "client-order-id": order_id,
             "symbol": exchange_symbol,
             "type": f"{side}-{order_type_str}",

@@ -60,7 +60,7 @@ class TWAPExecutor(ExecutorBase):
         self.close_timestamp = self._strategy.current_timestamp
         self.stop()
 
-    def validate_sufficient_balance(self):
+    async def validate_sufficient_balance(self):
         mid_price = self.get_price(self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
         total_amount_base = self.config.total_amount_quote / mid_price
         if self.is_perpetual_connector(self.config.connector_name):
@@ -193,7 +193,13 @@ class TWAPExecutor(ExecutorBase):
     def evaluate_all_orders_completed(self):
         if self.evaluate_all_orders_created():
             if all([order.order.is_filled for order in self._order_plan.values() if order and order.order]):
-                self._status = RunnableStatus.SHUTTING_DOWN
+                # Instead of shutting down, reset and start again for continuous execution
+                self._start_timestamp = self._strategy.current_timestamp
+                self._order_plan = self.create_order_plan()
+                self._failed_orders = []
+                self._refreshed_orders = []
+                # Keep status as RUNNING to continue looping
+                self.logger().info("All orders completed. Restarting TWAP cycle.")
 
     def evaluate_all_orders_created(self):
         return all([order for order in self._order_plan.values()])
@@ -202,8 +208,13 @@ class TWAPExecutor(ExecutorBase):
         refreshed_orders_done = all([order.is_done for order in self._refreshed_orders])
         failed_orders_done = all([order.is_done for order in self._failed_orders])
         if refreshed_orders_done and failed_orders_done:
-            self.close_execution_by(CloseType.COMPLETED)
-            self._status = RunnableStatus.TERMINATED
+            # Reset for next cycle instead of terminating
+            self._start_timestamp = self._strategy.current_timestamp
+            self._order_plan = self.create_order_plan()
+            self._failed_orders = []
+            self._refreshed_orders = []
+            self._status = RunnableStatus.RUNNING  # Continue running
+            self.logger().info("Cycle completed. Starting new TWAP cycle.")
         else:
             self._current_retries += 1
             await asyncio.sleep(5)
