@@ -67,11 +67,42 @@ python -m pip install --no-deps -r setup/pip_packages.txt 1> logs/pip_install.lo
 
 pre-commit install
 
-# Check for build-essential (only relevant for Debian-based systems)
+# Check for build tools (supports Debian and Red Hat-based systems)
 if [ "$(uname)" = "Linux" ]; then
-    if ! dpkg -s build-essential &> /dev/null; then
-        echo "build-essential not found, installing..."
-        sudo apt-get update && sudo apt-get upgrade -y
-        sudo apt-get install -y build-essential
+    # Check if gcc is available as a simple test for build tools
+    if ! command -v gcc &> /dev/null; then
+        echo "Build tools not found, installing..."
+
+        # Detect the Linux distribution
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            DISTRO=$ID
+        elif [ -f /etc/redhat-release ]; then
+            DISTRO="rhel"
+        else
+            DISTRO="unknown"
+        fi
+
+        case $DISTRO in
+            ubuntu|debian)
+                echo "Detected Debian-based system, installing build-essential..."
+                sudo apt-get update && sudo apt-get upgrade -y
+                sudo apt-get install -y build-essential
+                ;;
+            amzn|rhel|centos|fedora)
+                echo "Detected Red Hat-based system, installing Development Tools..."
+                # Use dnf if available (Amazon Linux 2023+, Fedora), otherwise yum
+                if command -v dnf &> /dev/null; then
+                    sudo dnf groupinstall -y "Development Tools"
+                else
+                    sudo yum groupinstall -y "Development Tools"
+                fi
+                ;;
+            *)
+                echo "Unknown Linux distribution. Please manually install build tools (gcc, g++, make)"
+                ;;
+        esac
+    else
+        echo "Build tools already installed."
     fi
 fi

@@ -112,10 +112,16 @@ class GatewayHttpClient:
             if use_ssl:
                 # SSL connection with client certs
                 cert_path = gateway_config.certs_path
-                ssl_ctx = ssl.create_default_context(cafile=f"{cert_path}/ca_cert.pem")
+                ssl_ctx = ssl.create_default_context()
+                # Load CA certificate for server verification
+                ssl_ctx.load_verify_locations(cafile=f"{cert_path}/ca_cert.pem")
+                # Load client certificate for mutual TLS
                 ssl_ctx.load_cert_chain(certfile=f"{cert_path}/client_cert.pem",
                                         keyfile=f"{cert_path}/client_key.pem",
                                         password=Security.secrets_manager.password.get_secret_value())
+                # Allow self-signed certificates for local development
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
                 conn = aiohttp.TCPConnector(ssl_context=ssl_ctx)
             else:
                 # Non-SSL connection for development
