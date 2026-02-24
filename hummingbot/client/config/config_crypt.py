@@ -55,6 +55,8 @@ class ETHKeyFileSecretManger(BaseSecretsManager):
     def decrypt_secret_value(self, attr: str, value: str) -> str:
         if self._password is None:
             raise ValueError(f"Could not decrypt secret attribute {attr} because no password was provided.")
+        # Normalize hex: strip and remove newlines so files saved with line wraps work
+        value = value.strip().replace("\n", "").replace("\r", "")
         value = binascii.unhexlify(value)
         decrypted_value = Account.decrypt(value.decode(), self._password).decode()
         return decrypted_value
