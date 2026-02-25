@@ -94,5 +94,6 @@ coverage.xml
 /**/.injective_cookie
 
 .env
+GEMINI_CONNECTOR_SUMMARY.md
 
 **/.claude/settings.local.json

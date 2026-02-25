@@ -39,8 +39,15 @@ if [[ $CONDA_DEFAULT_ENV != "hummingbot" ]]; then
     exit 1
 fi
 
+# Use conda environment's Python to avoid pyenv interference
+if [ -n "$CONDA_PREFIX" ]; then
+    PYTHON_CMD="$CONDA_PREFIX/bin/python"
+else
+    PYTHON_CMD="python"
+fi
+
 # Build the command to run
-CMD="./bin/hummingbot_quickstart.py"
+CMD="$PYTHON_CMD ./bin/hummingbot_quickstart.py"
 if [[ ! -z "$PASSWORD" ]]; then
     CMD="$CMD -p \"$PASSWORD\""
 fi

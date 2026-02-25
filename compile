@@ -2,4 +2,9 @@
 
 cd $(dirname "$0")
 
-python setup.py build_ext --inplace
+# Use conda environment's Python to avoid pyenv interference
+if [ -n "$CONDA_PREFIX" ]; then
+    $CONDA_PREFIX/bin/python setup.py build_ext --inplace
+else
+    python setup.py build_ext --inplace
+fi
