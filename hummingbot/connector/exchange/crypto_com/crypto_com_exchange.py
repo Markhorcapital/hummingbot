@@ -124,6 +124,20 @@ class CryptoComExchange(ExchangePyBase):
     def is_trading_required(self) -> bool:
         return self._trading_required
 
+    def get_exchange_limit_config(self, market: str) -> Dict[str, object]:
+        """
+        Override to avoid 'ClientConfigMap' object has no attribute 'get' when
+        client_config_map or balance_asset_limit is not dict-like (e.g. in API context).
+        """
+        try:
+            limits = getattr(self._client_config, "balance_asset_limit", None)
+            if limits is not None and isinstance(limits, dict):
+                exchange_limits = limits.get(market, {})
+                return exchange_limits if exchange_limits is not None else {}
+        except Exception:
+            pass
+        return {}
+
     def supported_order_types(self):
         return [OrderType.LIMIT, OrderType.MARKET, OrderType.LIMIT_MAKER]
 
@@ -447,10 +461,11 @@ class CryptoComExchange(ExchangePyBase):
 
     async def _update_balances(self):
         """
-        Update account balances
+        Update account balances via private/user-balance (Crypto.com requires empty params for consistency).
         """
         data = {
-            "method": "private/user-balance"
+            "method": "private/user-balance",
+            "params": {},
         }
 
         response = await self._api_post(
@@ -463,28 +478,45 @@ class CryptoComExchange(ExchangePyBase):
         self._account_balances.clear()
         self._account_available_balances.clear()
 
-        if response.get("code") == 0 and "result" in response:
-            # The working script shows the response structure for user-balance
-            result_data = response["result"].get("data", [])
-            if result_data:
-                balance_info = result_data[0]  # First element contains balance summary
+        if response.get("code") != 0:
+            self.logger().warning(
+                f"Crypto.com user-balance failed: code={response.get('code')}, "
+                f"message={response.get('message', '')}"
+            )
+            return
 
-                # Parse position balances (individual asset balances)
-                position_balances = balance_info.get("position_balances", [])
-                for position in position_balances:
-                    currency = position.get("instrument_name", "").upper()
-                    if currency:
-                        quantity = Decimal(str(position.get("quantity", "0")))
+        if "result" not in response:
+            self.logger().warning("Crypto.com user-balance response missing 'result'.")
+            return
 
-                        # Crypto.com uses "USD" but Hummingbot expects "USDT" for USDT pairs
-                        # Map USD -> USDT so balance checks work correctly
-                        if currency == "USD":
-                            currency = "USDT"
+        result_data = response["result"].get("data", [])
+        if not result_data:
+            self.logger().debug("Crypto.com user-balance returned empty data.")
+            return
 
-                        # For crypto.com, available balance might be the same as quantity
-                        # unless there are specific locked amounts
-                        self._account_balances[currency] = quantity
-                        self._account_available_balances[currency] = quantity
+        balance_info = result_data[0] if isinstance(result_data[0], dict) else {}
+        position_balances = balance_info.get("position_balances", [])
+        if not isinstance(position_balances, list):
+            return
+
+        for position in position_balances:
+            if not isinstance(position, dict):
+                continue
+            currency = (position.get("instrument_name") or "").strip().upper()
+            if not currency:
+                continue
+            quantity = Decimal(str(position.get("quantity", "0")))
+
+            # Crypto.com uses "USD" but Hummingbot expects "USDT" for USDT pairs
+            if currency == "USD":
+                currency = "USDT"
+
+            # Prefer max_withdrawal_balance for available if present
+            available = position.get("max_withdrawal_balance")
+            available_qty = Decimal(str(available)) if available is not None else quantity
+
+            self._account_balances[currency] = quantity
+            self._account_available_balances[currency] = available_qty
 
     async def _all_trade_updates_for_order(self, order: InFlightOrder) -> List[TradeUpdate]:
         """
