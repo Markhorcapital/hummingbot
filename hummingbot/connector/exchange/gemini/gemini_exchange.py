@@ -50,7 +50,8 @@ class GeminiExchange(ExchangePyBase):
                  gemini_api_secret: str,
                  trading_pairs: Optional[List[str]] = None,
                  trading_required: bool = True,
-                 domain: str = CONSTANTS.DEFAULT_DOMAIN):
+                 domain: str = CONSTANTS.DEFAULT_DOMAIN,
+                 balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None):
         """
         Initialize the Gemini exchange connector.
 
@@ -60,6 +61,7 @@ class GeminiExchange(ExchangePyBase):
         :param trading_pairs: List of trading pairs to track
         :param trading_required: Whether trading is required
         :param domain: Domain (for future sandbox support)
+        :param balance_asset_limit: Optional balance limits per asset (for API compatibility; unused)
         """
         self.api_key = gemini_api_key
         self.secret_key = gemini_api_secret
@@ -105,6 +107,51 @@ class GeminiExchange(ExchangePyBase):
             return OrderType.LIMIT_MAKER
         else:
             return OrderType.LIMIT  # default
+
+    def get_exchange_limit_config(self, market: str) -> Dict[str, object]:
+        """
+        Override to avoid 'ClientConfigMap' object has no attribute 'get' when
+        client_config_map or balance_asset_limit is not dict-like (e.g. in API context).
+        """
+        try:
+            limits = getattr(self._client_config, "balance_asset_limit", None)
+            if limits is not None and isinstance(limits, dict):
+                exchange_limits = limits.get(market, {})
+                return exchange_limits if exchange_limits is not None else {}
+        except Exception:
+            pass
+        return {}
+
+    async def exchange_symbol_associated_to_pair(self, trading_pair: str) -> str:
+        """
+        Override to support ALI-USDT -> ALIUSD mapping on Gemini.
+
+        Gemini uses USD (not USDT) for quote. The symbol map only has ALI-USD -> ALIUSD.
+        If the strategy uses ALI-USDT, resolve it via ALI-USD so the same exchange symbol is used.
+        """
+        symbol_map = await self.trading_pair_symbol_map()
+        try:
+            return symbol_map.inverse[trading_pair]
+        except KeyError:
+            if trading_pair.endswith("-USDT"):
+                pair_usa = trading_pair[:-5] + "-USD"  # e.g. ALI-USDT -> ALI-USD
+                if pair_usa in symbol_map.inverse:
+                    return symbol_map.inverse[pair_usa]
+            raise
+
+    async def trading_pair_associated_to_exchange_symbol(self, symbol: str) -> str:
+        """
+        Override so that when exchange sends ALIUSD we return ALI-USDT if that is what
+        the user configured (Gemini only has ALI-USD; we alias it for ALI-USDT).
+        """
+        symbol_map = await self.trading_pair_symbol_map()
+        hb_pair = symbol_map[symbol]
+        # If the connector is trading ALI-USDT, prefer returning that for ALIUSD
+        if hb_pair.endswith("-USD") and (self._trading_pairs or []):
+            alt = hb_pair[:-4] + "-USDT"
+            if alt in self._trading_pairs:
+                return alt
+        return hb_pair
 
     @property
     def authenticator(self):

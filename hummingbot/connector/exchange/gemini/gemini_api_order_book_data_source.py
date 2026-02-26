@@ -58,6 +58,16 @@ class GeminiAPIOrderBookDataSource(OrderBookTrackerDataSource):
         """
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
 
+    async def subscribe_to_trading_pair(self, trading_pair: str):
+        """Add a trading pair to the subscription list (takes effect on next WS connect)."""
+        if trading_pair not in self._trading_pairs:
+            self._trading_pairs.append(trading_pair)
+
+    async def unsubscribe_from_trading_pair(self, trading_pair: str):
+        """Remove a trading pair from the subscription list (takes effect on next WS connect)."""
+        if trading_pair in self._trading_pairs:
+            self._trading_pairs.remove(trading_pair)
+
     async def _request_order_book_snapshot(self, trading_pair: str) -> Dict[str, Any]:
         """
         Retrieve order book snapshot from Gemini REST API.
