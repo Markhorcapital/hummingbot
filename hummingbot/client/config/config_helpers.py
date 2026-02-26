@@ -787,6 +787,8 @@ async def read_system_configs_from_yml():
     Read global config and selected strategy yml files and save the values to corresponding config map
     If a yml file is outdated, it gets reformatted with the new template
     """
+    # Initialize fee overrides config map after connectors are loaded
+    init_fee_overrides_config()
     await load_yml_into_cm_legacy(
         str(TRADE_FEES_CONFIG_PATH), str(TEMPLATE_PATH / "conf_fee_overrides_TEMPLATE.yml"), fee_overrides_config_map
     )
