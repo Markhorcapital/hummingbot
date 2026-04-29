@@ -549,7 +549,10 @@ class PositionExecutor(ExecutorBase):
         :return: None
         """
         if self.is_expired:
-            self.place_close_order_and_cancel_open_orders(close_type=CloseType.TIME_LIMIT)
+            # For PMM-style spot usage, preserve any partially filled inventory on expiry instead of
+            # forcing a market close that can realize losses or fail on tiny residual amounts.
+            self.close_type = CloseType.POSITION_HOLD
+            self._status = RunnableStatus.SHUTTING_DOWN
 
     def place_take_profit_limit_order(self):
         """
