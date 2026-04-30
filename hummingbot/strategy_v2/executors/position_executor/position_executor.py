@@ -768,9 +768,7 @@ class PositionExecutor(ExecutorBase):
                     self._trailing_stop_trigger_pct = net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta
             else:
                 if net_pnl_pct < self._trailing_stop_trigger_pct:
-                    # Preserve inventory instead of forcing a market close on trailing-stop trigger.
-                    self.close_type = CloseType.POSITION_HOLD
-                    self._status = RunnableStatus.SHUTTING_DOWN
+                    self.place_close_order_and_cancel_open_orders(close_type=CloseType.TRAILING_STOP)
                 if net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta > self._trailing_stop_trigger_pct:
                     self._trailing_stop_trigger_pct = net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta
 
