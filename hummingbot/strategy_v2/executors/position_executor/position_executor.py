@@ -515,7 +515,9 @@ class PositionExecutor(ExecutorBase):
         """
         if self.config.triple_barrier_config.stop_loss:
             if self.net_pnl_pct <= -self.config.triple_barrier_config.stop_loss:
-                self.place_close_order_and_cancel_open_orders(close_type=CloseType.STOP_LOSS)
+                # Preserve inventory instead of forcing a market close on stop-loss trigger.
+                self.close_type = CloseType.POSITION_HOLD
+                self._status = RunnableStatus.SHUTTING_DOWN
 
     def control_take_profit(self):
         """
