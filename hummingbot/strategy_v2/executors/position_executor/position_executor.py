@@ -349,8 +349,9 @@ class PositionExecutor(ExecutorBase):
     async def control_close_order(self):
         """
         This method is responsible for controlling the close order. If the close order is filled and the open orders are
-        completed, it stops the executor. If the close order is not placed, it places the close order. If the close order
-        is not filled, it waits for the close order to be filled and requests the order information to the connector.
+        completed, it stops the executor. If the close order is not placed, it finalizes without a market close (same
+        inventory handling as POSITION_HOLD). If the close order is not filled, it waits for the close order to be filled
+        and requests the order information to the connector.
         """
         if self._close_order:
             in_flight_order = self.get_in_flight_order(self.config.connector_name,
@@ -366,7 +367,19 @@ class PositionExecutor(ExecutorBase):
                 self._failed_orders.append(self._close_order)
                 self._close_order = None
         else:
-            self.place_close_order_and_cancel_open_orders(close_type=self.close_type)
+            if self._open_order and self._open_order.is_filled and self._open_order.order:
+                new_json = self._open_order.order.to_json()
+                oid = new_json.get("client_order_id")
+                if not any(
+                    isinstance(h, dict) and h.get("client_order_id") == oid
+                    for h in self._held_position_orders
+                ):
+                    self._held_position_orders.append(new_json)
+            if len(self._held_position_orders) == 0:
+                self.close_type = CloseType.EARLY_STOP
+            else:
+                self.close_type = CloseType.POSITION_HOLD
+            self.stop()
 
     def evaluate_max_retries(self):
         """
@@ -768,7 +781,9 @@ class PositionExecutor(ExecutorBase):
                     self._trailing_stop_trigger_pct = net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta
             else:
                 if net_pnl_pct < self._trailing_stop_trigger_pct:
-                    self.place_close_order_and_cancel_open_orders(close_type=CloseType.TRAILING_STOP)
+                    # Preserve inventory instead of forcing a market close on trailing-stop trigger.
+                    self.close_type = CloseType.POSITION_HOLD
+                    self._status = RunnableStatus.SHUTTING_DOWN
                 if net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta > self._trailing_stop_trigger_pct:
                     self._trailing_stop_trigger_pct = net_pnl_pct - self.config.triple_barrier_config.trailing_stop.trailing_delta
 
