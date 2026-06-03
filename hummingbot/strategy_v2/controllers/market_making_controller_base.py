@@ -201,8 +201,12 @@ class MarketMakingControllerConfigBase(ControllerConfigBase):
         )
 
     def get_spreads_and_amounts_in_quote(self, trade_type: TradeType) -> Tuple[List[float], List[float]]:
-        buy_amounts_pct = getattr(self, 'buy_amounts_pct')
-        sell_amounts_pct = getattr(self, 'sell_amounts_pct')
+        buy_amounts_pct = getattr(self, 'buy_amounts_pct', None)
+        sell_amounts_pct = getattr(self, 'sell_amounts_pct', None)
+        if buy_amounts_pct is None:
+            buy_amounts_pct = [1 for _ in self.buy_spreads]
+        if sell_amounts_pct is None:
+            sell_amounts_pct = [1 for _ in self.sell_spreads]
 
         # Calculate total percentages across buys and sells
         total_pct = sum(buy_amounts_pct) + sum(sell_amounts_pct)

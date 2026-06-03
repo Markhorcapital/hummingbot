@@ -122,6 +122,24 @@ class TestMarketMakingControllerBase(IsolatedAsyncioWrapperTestCase):
         trailing_stop = TrailingStop(activation_price=Decimal("2"), trailing_delta=Decimal(0.5))
         self.assertEqual(trailing_stop, self.mock_controller_config.parse_trailing_stop(trailing_stop))
 
+    def test_get_spreads_and_amounts_with_none_amounts_pct(self):
+        controller_config = MarketMakingControllerConfigBase(
+            id="test",
+            controller_name="market_making_test_controller",
+            connector_name="binance",
+            trading_pair="ETH-USDT",
+            total_amount_quote=Decimal("300"),
+            buy_spreads=[0.01, 0.02],
+            sell_spreads=[0.01],
+        )
+        object.__setattr__(controller_config, "buy_amounts_pct", None)
+        object.__setattr__(controller_config, "sell_amounts_pct", None)
+        _, buy_amounts = controller_config.get_spreads_and_amounts_in_quote(TradeType.BUY)
+        _, sell_amounts = controller_config.get_spreads_and_amounts_in_quote(TradeType.SELL)
+        self.assertEqual(len(buy_amounts), 2)
+        self.assertEqual(len(sell_amounts), 1)
+        self.assertGreater(sum(buy_amounts) + sum(sell_amounts), 0)
+
     def test_get_required_base_amount(self):
         # Test that get_required_base_amount calculates correctly
         controller_config = MarketMakingControllerConfigBase(

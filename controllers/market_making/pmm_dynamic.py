@@ -1,433 +1,600 @@
+import os
+import time
 from decimal import Decimal
-from typing import List, Tuple
+from typing import List, Literal, Optional, Tuple
 
-import pandas as pd
-import pandas_ta as ta  # noqa: F401
 from pydantic import Field, field_validator
-from pydantic_core.core_schema import ValidationInfo
 
+from controllers.market_making.dex_cex_quoting import compute_regime_order_price
+from controllers.market_making.dex_cex_regime import update_regime_with_hysteresis
+from controllers.market_making.dex_cex_utils import WarningThrottler
+from controllers.market_making.dex_price_feed import DexPriceFeed, DexPriceFeedConfig, TwapSource, compute_basis_pct
+from hummingbot.core.data_type.common import PriceType, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.market_making_controller_base import (
     MarketMakingControllerBase,
     MarketMakingControllerConfigBase,
 )
+from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
+from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction
+
+# Phase 0 — ALI / WETH Uniswap V3 pool (Ethereum mainnet)
+DEFAULT_ALI_TOKEN = "0x6B0b3a982b4634aC68dD83a4DBF02311cE324181"
+DEFAULT_WETH_TOKEN = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+DEFAULT_POOL_ADDRESS = "0xF260d15e8eBe54D210ef53F5b61Cb46bD9Aa29EE"
+
+WARN_THROTTLE_SECONDS = 60.0
+STATUS_LOG_THROTTLE_SECONDS = 60.0
+DEBUG_LOG_THROTTLE_SECONDS = 30.0
 
 
 class PMMDynamicControllerConfig(MarketMakingControllerConfigBase):
     controller_name: str = "pmm_dynamic"
-    candles_config: List[CandlesConfig] = []
-    buy_spreads: List[float] = Field(
-        default="1,2,4",
+    candles_config: List[CandlesConfig] = Field(default=[])
+
+    dex_rpc_url: str = Field(
+        default="",
         json_schema_extra={
-            "prompt": "Enter a comma-separated list of buy spreads measured in units of volatility(e.g., '1, 2'): ",
-            "prompt_on_new": True, "is_updatable": True}
+            "prompt": "Ethereum RPC URL (or set DEX_RPC_URL env): ",
+            "prompt_on_new": True,
+        },
     )
-    sell_spreads: List[float] = Field(
-        default="1,2,4",
-        json_schema_extra={
-            "prompt": "Enter a comma-separated list of sell spreads measured in units of volatility(e.g., '1, 2'): ",
-            "prompt_on_new": True, "is_updatable": True}
+    dex_pool_address: str = Field(
+        default=DEFAULT_POOL_ADDRESS,
+        json_schema_extra={"prompt": "Uniswap V3 pool address: ", "prompt_on_new": True},
     )
-    candles_connector: str = Field(
-        default=None,
-        json_schema_extra={
-            "prompt": "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ",
-            "prompt_on_new": True})
-    candles_trading_pair: str = Field(
-        default=None,
-        json_schema_extra={
-            "prompt": "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ",
-            "prompt_on_new": True})
-    interval: str = Field(
-        default="3m",
-        json_schema_extra={
-            "prompt": "Enter the candle interval (e.g., 1m, 5m, 1h, 1d): ",
-            "prompt_on_new": True})
-    volatility_reference_pair: str = Field(
+    dex_base_token_address: str = Field(
+        default=DEFAULT_ALI_TOKEN,
+        json_schema_extra={"prompt": "Base token address (ALI): ", "prompt_on_new": True},
+    )
+    dex_quote_token_address: str = Field(
+        default=DEFAULT_WETH_TOKEN,
+        json_schema_extra={"prompt": "Quote token address (WETH): ", "prompt_on_new": True},
+    )
+    dex_eth_usdt_trading_pair: str = Field(
         default="ETH-USDT",
         json_schema_extra={
-            "prompt": "Enter the trading pair to use for NATR/RSI volatility calculation (e.g., ETH-USDT): ",
-            "prompt_on_new": True, "is_updatable": True})
-    volatility_spread_increment_pct: float = Field(
-        default=1.0,
-        json_schema_extra={
-            "prompt": "Enter the spread increment percentage to add when volatility is detected (e.g., 1.0 for 1%): ",
-            "prompt_on_new": True, "is_updatable": True}
+            "prompt": "ETH/USDT pair on the MM CEX (same connector): ",
+            "prompt_on_new": True,
+            "is_updatable": True,
+        },
     )
-    natr_length: int = Field(
-        default=14,
-        json_schema_extra={"prompt": "Enter the NATR length: ", "prompt_on_new": True})
-    rsi_length: int = Field(
-        default=14,
-        json_schema_extra={"prompt": "Enter the RSI length: ", "prompt_on_new": True})
-    rsi_buying_threshold: float = Field(
-        default=60.0,
-        json_schema_extra={
-            "prompt": "Enter the RSI threshold for buying pressure (e.g., 60.0): ",
-            "prompt_on_new": True, "is_updatable": True})
-    rsi_selling_threshold: float = Field(
-        default=40.0,
-        json_schema_extra={
-            "prompt": "Enter the RSI threshold for selling pressure (e.g., 40.0): ",
-            "prompt_on_new": True, "is_updatable": True})
-    rsi_asymmetric_multiplier: float = Field(
-        default=1.5,
-        json_schema_extra={
-            "prompt": "Enter the asymmetric spread multiplier for RSI-based adjustments (e.g., 1.5 for 50% wider spreads): ",
-            "prompt_on_new": True, "is_updatable": True})
-    volatility_threshold: float = Field(
-        default=1.0,
-        json_schema_extra={
-            "prompt": "Enter the volatility threshold as percentage (NATR percentage to trigger spread increase, e.g., 1.0 for 1%): ",
-            "prompt_on_new": True, "is_updatable": True}
+    dex_poll_interval_seconds: int = Field(
+        default=2,
+        json_schema_extra={"prompt": "DEX feed poll interval (seconds): ", "prompt_on_new": True},
     )
-    natr_upper_limit: float = Field(
-        default=10.0,
+    dex_twap_seconds: int = Field(
+        default=180,
+        json_schema_extra={"prompt": "Uniswap observe() TWAP window (seconds): ", "prompt_on_new": True},
+    )
+    dex_price_max_stale_seconds: int = Field(
+        default=30,
+        json_schema_extra={"prompt": "Max seconds without DEX feed before stale: ", "prompt_on_new": True},
+    )
+    dex_sanity_max_divergence_pct: Decimal = Field(
+        default=Decimal("0.15"),
         json_schema_extra={
-            "prompt": "Enter the maximum NATR percentage limit (orders will stop if NATR exceeds this, e.g., 10.0 for 10%): ",
-            "prompt_on_new": True, "is_updatable": True})
+            "prompt": "Max |cex-dex|/dex for broken-feed guard (e.g. 0.15): ",
+            "prompt_on_new": True,
+        },
+    )
+    regime_hysteresis_bps: int = Field(
+        default=50,
+        json_schema_extra={
+            "prompt": "Regime switch threshold in bps (e.g. 50 = 0.5%): ",
+            "prompt_on_new": True,
+        },
+    )
+    regime_hysteresis_ticks: int = Field(
+        default=2,
+        json_schema_extra={
+            "prompt": "Consecutive ticks beyond threshold to switch regime: ",
+            "prompt_on_new": True,
+        },
+    )
+    dex_cex_log_only: bool = Field(
+        default=True,
+        json_schema_extra={
+            "prompt": "Log-only mode (CEX quotes, log dex_fair/regime): true/false ",
+            "prompt_on_new": True,
+            "is_updatable": True,
+        },
+    )
+    dex_cex_debug: bool = Field(
+        default=True,
+        json_schema_extra={
+            "prompt": "Verbose DEX/CEX debug logs (feed + order path): true/false ",
+            "prompt_on_new": False,
+            "is_updatable": True,
+        },
+    )
 
-    @field_validator("candles_connector", mode="before")
+    @field_validator("dex_rpc_url", mode="before")
     @classmethod
-    def set_candles_connector(cls, v, validation_info: ValidationInfo):
-        if v is None or v == "":
-            return validation_info.data.get("connector_name")
-        return v
+    def resolve_dex_rpc_url(cls, v):
+        if v is None or str(v).strip() == "":
+            v = os.getenv("DEX_RPC_URL") or os.getenv("WEB3_PROVIDER")
+        if not v:
+            raise ValueError("dex_rpc_url is required (or set DEX_RPC_URL / WEB3_PROVIDER)")
+        return str(v).strip()
 
-    @field_validator("candles_trading_pair", mode="before")
+    @field_validator("dex_sanity_max_divergence_pct", mode="before")
     @classmethod
-    def set_candles_trading_pair(cls, v, validation_info: ValidationInfo):
-        if v is None or v == "":
-            return validation_info.data.get("trading_pair")
+    def parse_dex_sanity(cls, v):
+        if isinstance(v, str):
+            if v == "":
+                return Decimal("0.15")
+            return Decimal(v)
+        if isinstance(v, (int, float)):
+            return Decimal(str(v))
         return v
 
 
 class PMMDynamicController(MarketMakingControllerBase):
     """
-    This is a dynamic version of the PMM controller. It uses NATR to detect volatility
-    and RSI to determine buying vs selling pressure. When volatility is detected, it
-    increases spreads asymmetrically based on RSI direction:
-    - Buying pressure (RSI > threshold): Wider sell spreads
-    - Selling pressure (RSI < threshold): Wider buy spreads
-    - Neutral: Equal spread adjustment
-    The spread increment amount is specified by volatility_spread_increment_pct parameter.
-    It also uses the Triple Barrier Strategy to manage the risk.
+    CEX + DEX asymmetric market making.
+
+    Uses Uniswap V3 pool TWAP (observe) × CEX ETH/USDT for dex_fair, then Regime A/B quoting.
+    Phase 2: dex_cex_log_only=True keeps CEX mid ± spreads while logging feed/regime.
+    Phase 3: dex_cex_log_only=False uses Regime A/B anchors; skips levels when feed stale or sanity fails.
     """
 
     def __init__(self, config: PMMDynamicControllerConfig, *args, **kwargs):
         self.config = config
-        # Use max of natr_length and rsi_length for max_records calculation
-        self.max_records = max(config.natr_length, config.rsi_length) + 5
-        self._previous_natr_exceeded = False  # Track previous state for resume logging
-        if len(self.config.candles_config) == 0:
-            self.config.candles_config = [CandlesConfig(
-                connector=config.candles_connector,
-                trading_pair=config.volatility_reference_pair,  # Use volatility reference pair for indicators
-                interval=config.interval,
-                max_records=self.max_records
-            )]
+        self._regime: Optional[Literal["A", "B"]] = None
+        self._regime_confirm_count: int = 0
+        self._last_logged_regime: Optional[str] = None
+        self._dex_feed: Optional[DexPriceFeed] = None
+        self._warn_throttle = WarningThrottler(WARN_THROTTLE_SECONDS)
+        self._status_log_throttle = WarningThrottler(STATUS_LOG_THROTTLE_SECONDS)
+        self._debug_log_throttle = WarningThrottler(DEBUG_LOG_THROTTLE_SECONDS)
         super().__init__(config, *args, **kwargs)
+        self.market_data_provider.initialize_rate_sources([
+            ConnectorPair(
+                connector_name=config.connector_name,
+                trading_pair=config.trading_pair,
+            ),
+            ConnectorPair(
+                connector_name=config.connector_name,
+                trading_pair=config.dex_eth_usdt_trading_pair,
+            ),
+        ])
 
-    async def update_processed_data(self):
-        # Only use volatility_reference_pair (e.g., ETH-USDT) for NATR/RSI calculation
-        # No fallback - if volatility_reference_pair candles are not available, skip NATR/RSI
-        volatility_pair = self.config.volatility_reference_pair
-
-        # Get reference price for trading pair (always needed for order placement)
-        from hummingbot.core.data_type.common import PriceType
-        try:
-            reference_price = self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
-            )
-        except Exception as e:
-            self.logger().error(
-                f"Error getting reference price for {self.config.trading_pair}: {str(e)}. "
-                f"Setting default values."
-            )
-            self.processed_data = {
-                "reference_price": Decimal("0"),
-                "buy_spread_adjustment": Decimal("0"),
-                "sell_spread_adjustment": Decimal("0"),
-                "natr_exceeded_limit": False,
-                "features": pd.DataFrame()
-            }
+    def _debug(self, key: str, msg: str, *args, now: Optional[float] = None) -> None:
+        if not self.config.dex_cex_debug:
             return
+        now = now or time.time()
+        if self._debug_log_throttle.should_log(key, now):
+            self.logger().info(msg, *args)
 
-        # Try to fetch candles for volatility reference pair ONLY
+    def _eth_usdt_mid_available(self) -> bool:
+        """CEX ETH/USDT order book must exist before DexPriceFeed can poll."""
         try:
-            candles = self.market_data_provider.get_candles_df(
-                connector_name=self.config.candles_connector,
-                trading_pair=volatility_pair,
-                interval=self.config.interval,
-                max_records=self.max_records
-            )
-
-            # Validate candles DataFrame
-            if candles is None or len(candles) == 0:
-                self.logger().warning(
-                    f"No candles data available for {volatility_pair}. "
-                    f"Skipping NATR/RSI calculation. Using default spread adjustments (no volatility adjustment)."
+            connector = self.market_data_provider.get_connector(self.config.connector_name)
+            if not connector.ready:
+                self._debug(
+                    "eth_usdt_wait",
+                    "[DEX/CEX] %s not ready for feed: %s",
+                    self.config.connector_name,
+                    connector.status_dict,
                 )
-                # Use default values without NATR/RSI
-                self.processed_data = {
-                    "reference_price": Decimal(reference_price),
-                    "buy_spread_adjustment": Decimal("0"),
-                    "sell_spread_adjustment": Decimal("0"),
-                    "natr_exceeded_limit": False,
-                    "features": pd.DataFrame()
-                }
-                return
-
+                return False
+            self.market_data_provider.get_price_by_type(
+                self.config.connector_name,
+                self.config.dex_eth_usdt_trading_pair,
+                PriceType.MidPrice,
+            )
+            return True
         except Exception as e:
-            self.logger().error(
-                f"Error fetching candles for {volatility_pair}: {str(e)}. "
-                f"Skipping NATR/RSI calculation. Using default spread adjustments (no volatility adjustment)."
-            )
-            # Use default values without NATR/RSI
-            self.processed_data = {
-                "reference_price": Decimal(reference_price),
-                "buy_spread_adjustment": Decimal("0"),
-                "sell_spread_adjustment": Decimal("0"),
-                "natr_exceeded_limit": False,
-                "features": pd.DataFrame()
-            }
-            return
+            self._debug("eth_usdt_fail", "[DEX/CEX] %s mid unavailable: %s", self.config.dex_eth_usdt_trading_pair, e)
+            return False
 
-        # Check if required columns exist
-        required_columns = ["high", "low", "close"]
-        missing_columns = [col for col in required_columns if col not in candles.columns]
-        if missing_columns:
-            self.logger().warning(
-                f"Missing required columns for NATR calculation: {missing_columns}. "
-                f"Skipping NATR/RSI calculation. Using default spread adjustments (no volatility adjustment)."
-            )
-            # Use default values without NATR/RSI
-            self.processed_data = {
-                "reference_price": Decimal(reference_price),
-                "buy_spread_adjustment": Decimal("0"),
-                "sell_spread_adjustment": Decimal("0"),
-                "natr_exceeded_limit": False,
-                "features": pd.DataFrame()
-            }
-            return
-
-        # Log candle count for debugging
-        num_candles = len(candles)
-        if num_candles < self.config.natr_length:
-            self.logger().warning(
-                f"Insufficient candles for NATR calculation: {num_candles} candles available, "
-                f"but {self.config.natr_length} required. Using available candles."
-            )
-
-        # Calculate NATR using pandas_ta (original hummingbot implementation)
-        natr_raw = ta.natr(
-            candles["high"], candles["low"], candles["close"],
-            length=self.config.natr_length
+    def _ensure_dex_feed(self, now: float) -> bool:
+        """
+        Lazy-init DexPriceFeed after the MM connector is ready (avoids startup race when
+        the controller is added before CEX order books are loaded). Retries each tick.
+        """
+        if self._dex_feed is not None:
+            return True
+        if not self._eth_usdt_mid_available():
+            if self._warn_throttle.should_log("dex_feed_wait_cex", now):
+                self.logger().warning(
+                    "DexPriceFeed waiting for %s on %s (connector or order book not ready yet)",
+                    self.config.dex_eth_usdt_trading_pair,
+                    self.config.connector_name,
+                )
+            return False
+        feed_config = DexPriceFeedConfig(
+            dex_rpc_url=self.config.dex_rpc_url,
+            dex_pool_address=self.config.dex_pool_address,
+            base_token_address=self.config.dex_base_token_address,
+            quote_token_address=self.config.dex_quote_token_address,
+            connector_name=self.config.connector_name,
+            dex_eth_usdt_trading_pair=self.config.dex_eth_usdt_trading_pair,
+            dex_twap_seconds=self.config.dex_twap_seconds,
+            dex_poll_interval_seconds=self.config.dex_poll_interval_seconds,
+            dex_price_max_stale_seconds=self.config.dex_price_max_stale_seconds,
+            dex_sanity_max_divergence_pct=self.config.dex_sanity_max_divergence_pct,
+            verbose_logging=self.config.dex_cex_debug,
         )
-
-        # Check if NATR calculation returned None or invalid result
-        if natr_raw is None:
-            self.logger().warning("NATR calculation returned None. Using default value.")
-            current_natr = 0.01  # Default 1% if calculation fails
-            natr = pd.Series([current_natr] * num_candles)
-        elif len(natr_raw) == 0:
-            self.logger().warning("NATR calculation returned empty result. Using default value.")
-            current_natr = 0.01  # Default 1% if calculation fails
-            natr = pd.Series([current_natr] * num_candles)
-        else:
-            # Divide by 100 to convert from 0-100 range to 0-1 range
-            natr = natr_raw / 100
-
-            # Get current NATR value
-            current_natr = natr.iloc[-1]
-
-        # Handle NaN or invalid NATR
-        if pd.isna(current_natr) or current_natr <= 0:
-            current_natr = 0.001  # Default 1% if invalid
-
-        # Calculate NATR statistics for reference (not used for detection)
-        # natr_mean = natr.mean()
-        # natr_std = natr.std()
-
-        # Check if volatility is detected (current NATR percentage is above threshold)
-        volatility_detected = False
-        natr_exceeded_limit = False  # Flag to track if NATR exceeds upper limit
-
-        # Convert NATR to percentage (0-1 range to 0-100 range) and compare directly
-        current_natr_percentage = current_natr * 100  # Convert to percentage
-
-        # Print NATR value
-        # self.logger().info(f"[NATR] Current NATR: {current_natr_percentage:.4f}%")
-
-        if not pd.isna(current_natr_percentage):
-            # Check if NATR exceeds upper limit (stop orders)
-            if current_natr_percentage >= self.config.natr_upper_limit:
-                natr_exceeded_limit = True
-                self.logger().warning(
-                    f"[NATR Upper Limit] NATR ({current_natr_percentage:.4f}%) exceeds upper limit "
-                    f"({self.config.natr_upper_limit:.2f}%). New orders will be stopped. "
-                    f"Monitoring continues - orders will resume when NATR drops below limit."
-                )
-            # If NATR percentage is above threshold (but below upper limit), volatility is detected
-            elif current_natr_percentage >= self.config.volatility_threshold:
-                volatility_detected = True
-
-        # Check if orders should resume (NATR dropped below limit)
-        if self._previous_natr_exceeded and not natr_exceeded_limit:
-            self.logger().info(
-                f"[NATR Upper Limit] NATR ({current_natr_percentage:.4f}%) has dropped below upper limit "
-                f"({self.config.natr_upper_limit:.2f}%). Resuming new order placement."
-            )
-
-        # Update previous state
-        self._previous_natr_exceeded = natr_exceeded_limit
-
-        # Calculate RSI to determine buying vs selling pressure
-        rsi = ta.rsi(candles["close"], length=self.config.rsi_length)
-
-        # Check if RSI calculation returned None or invalid result
-        if rsi is None:
-            self.logger().warning("RSI calculation returned None. Using default value.")
-            current_rsi = 50.0  # Default neutral RSI
-        elif len(rsi) == 0:
-            self.logger().warning("RSI calculation returned empty result. Using default value.")
-            current_rsi = 50.0  # Default neutral RSI
-        else:
-            current_rsi = rsi.iloc[-1]
-
-            # Handle NaN or invalid RSI
-            if pd.isna(current_rsi) or current_rsi <= 0 or current_rsi >= 100:
-                current_rsi = 50.0  # Default neutral RSI
-
-        # Print RSI value
-        # self.logger().info(f"[RSI] Current RSI: {current_rsi:.2f}")
-
-        # Determine pressure direction based on RSI
-        buying_pressure = current_rsi > self.config.rsi_buying_threshold
-        selling_pressure = current_rsi < self.config.rsi_selling_threshold
-
-        # Calculate spread adjustments based on volatility and direction
-        base_spread_adjustment = Decimal(str(self.config.volatility_spread_increment_pct)) / Decimal("100") if volatility_detected else Decimal("0")
-
-        # Apply asymmetric spread adjustments based on RSI direction
-        asymmetric_multiplier = Decimal(str(self.config.rsi_asymmetric_multiplier))
-
-        if volatility_detected:
-            if buying_pressure:
-                # High volatility + Buying pressure = Protect sell side more
-                buy_spread_adjustment = Decimal("0")
-                sell_spread_adjustment = base_spread_adjustment * asymmetric_multiplier
-                pressure_direction = "Buying"
-            elif selling_pressure:
-                # High volatility + Selling pressure = Protect buy side more
-                buy_spread_adjustment = base_spread_adjustment * asymmetric_multiplier
-                sell_spread_adjustment = Decimal("0")
-                pressure_direction = "Selling"
-            else:
-                # High volatility + Neutral = Equal adjustment
-                buy_spread_adjustment = base_spread_adjustment
-                sell_spread_adjustment = base_spread_adjustment
-                pressure_direction = "Neutral"
-        else:
-            # No volatility = No adjustment
-            buy_spread_adjustment = Decimal("0")
-            sell_spread_adjustment = Decimal("0")
-            pressure_direction = "None"
-
-        # Reference price should be from the trading pair (ALI-USDT), not from volatility reference pair (ETH-USDT)
-        # Get the current price for the actual trading pair
-        from hummingbot.core.data_type.common import PriceType
         try:
-            reference_price = self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
+            self._dex_feed = DexPriceFeed(
+                config=feed_config,
+                market_data_provider=self.market_data_provider,
+                logger=self.logger(),
             )
+            eth_mid = self._dex_feed.get_eth_usdt_mid()
         except Exception as e:
-            self.logger().warning(
-                f"Error getting reference price for {self.config.trading_pair}: {str(e)}. "
-                f"Falling back to last candle close price from trading pair candles."
-            )
-            # Fallback: try to get candles for the trading pair
-            try:
-                trading_pair_candles = self.market_data_provider.get_candles_df(
-                    connector_name=self.config.candles_connector,
-                    trading_pair=self.config.trading_pair,
-                    interval=self.config.interval,
-                    max_records=1
+            self._dex_feed = None
+            if self._warn_throttle.should_log("dex_feed_init_fail", now):
+                self.logger().warning(
+                    "DexPriceFeed init failed (%s on %s): %s",
+                    self.config.dex_eth_usdt_trading_pair,
+                    self.config.connector_name,
+                    e,
                 )
-                if trading_pair_candles is not None and len(trading_pair_candles) > 0:
-                    reference_price = trading_pair_candles["close"].iloc[-1]
-                else:
-                    # Last resort: use ETH price (wrong but better than crashing)
-                    reference_price = candles["close"].iloc[-1]
-                    self.logger().error(
-                        "Using volatility reference pair price as fallback. "
-                        "This may cause incorrect order prices!"
-                    )
-            except Exception as e2:
-                self.logger().error(
-                    f"Critical: Cannot get reference price: {str(e2)}. Using ETH price as fallback."
-                )
-                reference_price = candles["close"].iloc[-1]
-        # self.logger().info(f"[Reference Price] Reference price: {reference_price}")
-        # Log only when volatility is detected or when status changes (reduces log spam)
-        if volatility_detected or natr_exceeded_limit or (self._previous_natr_exceeded != natr_exceeded_limit):
+            return False
+        self.logger().info(
+            "DexPriceFeed initialized; %s mid=%s pool=%s twap=%ss",
+            self.config.dex_eth_usdt_trading_pair,
+            eth_mid,
+            self.config.dex_pool_address,
+            self.config.dex_twap_seconds,
+        )
+        return True
+
+    def _update_regime(self, basis_pct: Optional[Decimal]) -> Optional[Literal["A", "B"]]:
+        old = self._regime
+        self._regime, self._regime_confirm_count = update_regime_with_hysteresis(
+            basis_pct,
+            self._regime,
+            self._regime_confirm_count,
+            self.config.regime_hysteresis_bps,
+            self.config.regime_hysteresis_ticks,
+        )
+        if old is not None and self._regime != old and basis_pct is not None:
             self.logger().info(
-                f"[PMM Dynamic] NATR: {current_natr_percentage:.4f}% | "
-                f"RSI: {current_rsi:.1f} | "
-                f"Volatility: {'Detected' if volatility_detected else 'Normal'} | "
-                f"Direction: {pressure_direction} | "
-                f"Buy Adj: {float(buy_spread_adjustment) * 100:.2f}% | "
-                f"Sell Adj: {float(sell_spread_adjustment) * 100:.2f}% | "
-                f"Orders: {'STOPPED' if natr_exceeded_limit else 'ACTIVE'}"
+                "Regime %s -> %s (basis_pct=%s)",
+                old,
+                self._regime,
+                f"{basis_pct * 100:.4f}%",
             )
+        elif (
+            old is None
+            and self._regime is not None
+            and basis_pct is not None
+            and not self.config.dex_cex_log_only
+        ):
+            self.logger().info(
+                "Regime initialized -> %s (basis_pct=%s)",
+                self._regime,
+                f"{basis_pct * 100:.4f}%",
+            )
+        return self._regime
 
-        candles["buy_spread_adjustment"] = float(buy_spread_adjustment)
-        candles["sell_spread_adjustment"] = float(sell_spread_adjustment)
-        candles["reference_price"] = reference_price
-        candles["volatility_detected"] = volatility_detected
-        candles["current_rsi"] = current_rsi
-        candles["pressure_direction"] = pressure_direction
-
-        self.processed_data = {
-            "reference_price": Decimal(reference_price),
-            "buy_spread_adjustment": buy_spread_adjustment,
-            "sell_spread_adjustment": sell_spread_adjustment,
-            "natr_exceeded_limit": natr_exceeded_limit,  # Flag to prevent order placement
-            "features": candles
+    def _hypothetical_prices(self, level: int = 0) -> dict:
+        cex_mid = self.processed_data.get("cex_mid")
+        dex_fair = self.processed_data.get("dex_fair")
+        if cex_mid is None or dex_fair is None:
+            return {}
+        buy_spreads, _ = self.config.get_spreads_and_amounts_in_quote(TradeType.BUY)
+        sell_spreads, _ = self.config.get_spreads_and_amounts_in_quote(TradeType.SELL)
+        buy_s = Decimal(str(buy_spreads[level]))
+        sell_s = Decimal(str(sell_spreads[level]))
+        return {
+            "regime_a_buy": dex_fair * (1 - buy_s),
+            "regime_a_sell": cex_mid * (1 + sell_s),
+            "regime_b_buy": cex_mid * (1 - buy_s),
+            "regime_b_sell": dex_fair * (1 + sell_s),
         }
 
-    def get_price_and_amount(self, level_id: str) -> Tuple[Decimal, Decimal]:
-        """
-        Get the spread and amount in quote for a given level id.
-        Override to add spread_adjustment when volatility is detected.
-        Uses separate buy and sell spread adjustments based on RSI direction.
-        """
-        from hummingbot.core.data_type.common import TradeType
+    def _log_feed_status(self, now: float) -> None:
+        pd = self.processed_data
+        regime = pd.get("regime")
+        stale = pd.get("feed_stale")
 
+        if self.config.dex_cex_debug and self._debug_log_throttle.should_log("dex_cex_heartbeat", now):
+            basis = pd.get("basis_pct")
+            basis_str = f"{basis * 100:.4f}%" if basis is not None else None
+            self.logger().info(
+                "[DEX/CEX] heartbeat log_only=%s regime=%s cex_mid=%s dex_fair=%s basis=%s "
+                "twap_source=%s stale=%s sanity_ok=%s eth_usdt=%s mdp_ready=%s",
+                self.config.dex_cex_log_only,
+                regime,
+                pd.get("cex_mid"),
+                pd.get("dex_fair"),
+                basis_str,
+                pd.get("twap_source"),
+                stale,
+                pd.get("feed_sanity_ok"),
+                pd.get("eth_usdt_mid"),
+                self.market_data_provider.ready,
+            )
+
+        if regime == self._last_logged_regime and not stale:
+            return
+        if stale and regime == self._last_logged_regime:
+            if not self._status_log_throttle.should_log("dex_cex_status_stale", now):
+                return
+        self._last_logged_regime = regime
+        hypo = self._hypothetical_prices(0)
+        self.logger().info(
+            "[DEX/CEX] log_only=%s regime=%s cex_mid=%s dex_fair=%s basis=%s "
+            "twap_source=%s stale=%s sanity_ok=%s | L0 A: buy=%s sell=%s | L0 B: buy=%s sell=%s",
+            self.config.dex_cex_log_only,
+            regime,
+            pd.get("cex_mid"),
+            pd.get("dex_fair"),
+            f"{pd.get('basis_pct') * 100:.4f}%" if pd.get("basis_pct") is not None else None,
+            pd.get("twap_source"),
+            stale,
+            pd.get("feed_sanity_ok"),
+            hypo.get("regime_a_buy"),
+            hypo.get("regime_a_sell"),
+            hypo.get("regime_b_buy"),
+            hypo.get("regime_b_sell"),
+        )
+
+    def _log_feed_warnings(
+        self,
+        now: float,
+        snap,
+        feed_stale: bool,
+        feed_sanity_ok: bool,
+        dex_fair: Optional[Decimal],
+    ) -> None:
+        if snap and snap.twap_source == TwapSource.FALLBACK:
+            if self._warn_throttle.should_log("twap_fallback", now):
+                self.logger().warning("DexPriceFeed using fallback TWAP (observe unavailable)")
+        if feed_stale and self._warn_throttle.should_log("feed_stale", now):
+            self.logger().warning(
+                "DexPriceFeed stale (last success > %ss ago)",
+                self.config.dex_price_max_stale_seconds,
+            )
+        if dex_fair is not None and not feed_sanity_ok:
+            if self._warn_throttle.should_log("sanity_fail", now):
+                self.logger().warning(
+                    "DexPriceFeed sanity check failed (|cex-dex|/dex > %s)",
+                    self.config.dex_sanity_max_divergence_pct,
+                )
+
+    async def update_processed_data(self):
+        now = time.time()
+        try:
+            cex_mid = Decimal(
+                str(
+                    self.market_data_provider.get_price_by_type(
+                        self.config.connector_name,
+                        self.config.trading_pair,
+                        PriceType.MidPrice,
+                    )
+                )
+            )
+        except Exception as e:
+            self.logger().error("Failed to get cex_mid for %s: %s", self.config.trading_pair, e)
+            self.processed_data = {
+                "reference_price": Decimal("0"),
+                "cex_mid": None,
+                "dex_fair": None,
+                "basis_pct": None,
+                "regime": self._regime,
+                "feed_stale": True,
+                "feed_sanity_ok": False,
+                "twap_source": self._last_twap_source(),
+            }
+            return
+
+        feed_ready = self._ensure_dex_feed(now)
+        if not feed_ready:
+            self._debug("feed_not_ready", "[DEX/CEX] feed not ready (waiting for ETH-USDT or RPC)", now=now)
+        elif self._dex_feed.should_poll(now):
+            self._dex_feed.poll(cex_mid=cex_mid)
+        else:
+            self._debug(
+                "poll_skip",
+                "[DEX/CEX] poll skipped (interval %ss)",
+                self.config.dex_poll_interval_seconds,
+                now=now,
+            )
+
+        snap = self._dex_feed.snapshot if self._dex_feed else None
+        dex_fair = snap.dex_fair if snap else None
+        basis_pct = compute_basis_pct(cex_mid, dex_fair)
+        regime = self._update_regime(basis_pct)
+        feed_stale = self._dex_feed.is_stale(now) if self._dex_feed else True
+        feed_sanity_ok = (
+            self._dex_feed.sanity_ok(cex_mid) if self._dex_feed and dex_fair is not None else False
+        )
+
+        self._log_feed_warnings(now, snap, feed_stale, feed_sanity_ok, dex_fair)
+
+        if (
+            not self.config.dex_cex_log_only
+            and regime is None
+            and dex_fair is not None
+            and basis_pct is not None
+            and self._warn_throttle.should_log("regime_unset", now)
+        ):
+            self.logger().warning(
+                "Regime unset (basis_pct=%s); no Regime A/B quotes until |basis| > %s bps",
+                f"{basis_pct * 100:.4f}%",
+                self.config.regime_hysteresis_bps,
+            )
+
+        self.processed_data = {
+            "reference_price": cex_mid,
+            "cex_mid": cex_mid,
+            "dex_fair": dex_fair,
+            "basis_pct": basis_pct,
+            "regime": regime,
+            "feed_stale": feed_stale,
+            "feed_sanity_ok": feed_sanity_ok,
+            "twap_source": snap.twap_source.value if snap else TwapSource.NONE.value,
+            "eth_usdt_mid": snap.eth_usdt_mid if snap else None,
+            "spread_multiplier": Decimal("1"),
+        }
+        self._log_feed_status(now)
+
+    def _last_twap_source(self) -> str:
+        if self._dex_feed is not None:
+            return self._dex_feed.snapshot.twap_source.value
+        return TwapSource.NONE.value
+
+    def get_price_and_amount(self, level_id: str) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+        if self.config.dex_cex_log_only:
+            return MarketMakingControllerBase.get_price_and_amount(self, level_id)
+        return self._get_regime_price_and_amount(level_id)
+
+    def _get_regime_price_and_amount(
+        self, level_id: str
+    ) -> Tuple[Optional[Decimal], Optional[Decimal]]:
         level = self.get_level_from_level_id(level_id)
         trade_type = self.get_trade_type_from_level_id(level_id)
         spreads, amounts_quote = self.config.get_spreads_and_amounts_in_quote(trade_type)
-        reference_price = Decimal(self.processed_data["reference_price"])
+        spread = Decimal(str(spreads[int(level)]))
 
-        # Get base spread from config (as percentage, e.g., 0.5 = 0.5%)
-        base_spread_pct = Decimal(spreads[int(level)]) / Decimal("100")
+        cex_mid = self.processed_data.get("cex_mid")
+        dex_fair = self.processed_data.get("dex_fair")
+        regime = self.processed_data.get("regime")
 
-        # Get appropriate spread adjustment based on trade type
-        if trade_type == TradeType.BUY:
-            spread_adjustment = Decimal(self.processed_data["buy_spread_adjustment"])
-        else:  # TradeType.SELL
-            spread_adjustment = Decimal(self.processed_data["sell_spread_adjustment"])
+        if (
+            cex_mid is None
+            or dex_fair is None
+            or regime is None
+            or self.processed_data.get("feed_stale")
+            or not self.processed_data.get("feed_sanity_ok")
+        ):
+            self._debug(
+                f"regime_price_skip_{level_id}",
+                "[DEX/CEX ORDER SKIP] %s live quote blocked: cex_mid=%s dex_fair=%s regime=%s "
+                "stale=%s sanity_ok=%s",
+                level_id,
+                cex_mid,
+                dex_fair,
+                regime,
+                self.processed_data.get("feed_stale"),
+                self.processed_data.get("feed_sanity_ok"),
+            )
+            return None, None
 
-        spread_in_pct = base_spread_pct + spread_adjustment
-
-        # Calculate order price
-        side_multiplier = Decimal("-1") if trade_type == TradeType.BUY else Decimal("1")
-        order_price = reference_price * (1 + side_multiplier * spread_in_pct)
-
+        order_price = compute_regime_order_price(
+            regime=regime,
+            is_buy=trade_type == TradeType.BUY,
+            spread=spread,
+            cex_mid=cex_mid,
+            dex_fair=dex_fair,
+        )
         return order_price, Decimal(amounts_quote[int(level)]) / order_price
 
-    def get_executor_config(self, level_id: str, price: Decimal, amount: Decimal):
+    def get_levels_to_execute(self) -> List[str]:
+        if not self.config.dex_cex_log_only:
+            if self.processed_data.get("feed_stale") or not self.processed_data.get("feed_sanity_ok"):
+                self._debug(
+                    "levels_blocked",
+                    "[DEX/CEX] no levels (live mode): stale=%s sanity_ok=%s dex_fair=%s regime=%s",
+                    self.processed_data.get("feed_stale"),
+                    self.processed_data.get("feed_sanity_ok"),
+                    self.processed_data.get("dex_fair"),
+                    self.processed_data.get("regime"),
+                )
+                return []
+        levels = super().get_levels_to_execute()
+        self._debug(
+            "levels",
+            "[DEX/CEX] levels_to_execute=%s active_executors=%s",
+            levels,
+            len(self.executors_info),
+        )
+        return levels
+
+    def _log_live_quote(self, level_id: str, price: Decimal, amount: Decimal, now: float) -> None:
+        if self.config.dex_cex_log_only:
+            return
+        if not self._warn_throttle.should_log(f"live_quote_{level_id}", now):
+            return
+        pd = self.processed_data
+        basis = pd.get("basis_pct")
+        basis_str = f"{basis * 100:.4f}%" if basis is not None else None
+        self.logger().info(
+            "[DEX/CEX QUOTE] %s regime=%s price=%s amount=%s cex_mid=%s dex_fair=%s basis=%s",
+            level_id,
+            pd.get("regime"),
+            price,
+            amount,
+            pd.get("cex_mid"),
+            pd.get("dex_fair"),
+            basis_str,
+        )
+
+    def create_actions_proposal(self) -> List[ExecutorAction]:
+        create_actions = []
+        now = time.time()
+        position_rebalance_action = self.check_position_rebalance()
+        if position_rebalance_action:
+            self._debug("rebalance", "[DEX/CEX] proposing position rebalance", now=now)
+            create_actions.append(position_rebalance_action)
+
+        levels = self.get_levels_to_execute()
+        if not levels:
+            self._debug("no_levels", "[DEX/CEX] create_actions: no levels to execute", now=now)
+
+        for level_id in levels:
+            price, amount = self.get_price_and_amount(level_id)
+            if price is None or amount is None or price <= 0 or amount <= 0:
+                self.logger().info(
+                    "[DEX/CEX ORDER SKIP] %s log_only=%s price=%s amount=%s ref=%s",
+                    level_id,
+                    self.config.dex_cex_log_only,
+                    price,
+                    amount,
+                    self.processed_data.get("reference_price"),
+                )
+                continue
+            self._log_live_quote(level_id, price, amount, now)
+            mode = "CEX" if self.config.dex_cex_log_only else "REGIME"
+            self.logger().info(
+                "[DEX/CEX ORDER] %s mode=%s price=%s amount=%s cex_mid=%s dex_fair=%s regime=%s",
+                level_id,
+                mode,
+                price,
+                amount,
+                self.processed_data.get("cex_mid"),
+                self.processed_data.get("dex_fair"),
+                self.processed_data.get("regime"),
+            )
+            executor_config = self.get_executor_config(level_id, price, amount)
+            if executor_config is not None:
+                create_actions.append(
+                    CreateExecutorAction(
+                        controller_id=self.config.id,
+                        executor_config=executor_config,
+                    )
+                )
+        self._debug("actions", "[DEX/CEX] create_actions count=%s", len(create_actions), now=now)
+        return create_actions
+
+    async def control_task(self):
+        if self.config.dex_cex_debug and not self.market_data_provider.ready:
+            self._debug(
+                "mdp_not_ready",
+                "[DEX/CEX] controller tick skipped: market_data_provider.ready=False",
+            )
+        elif self.config.dex_cex_debug and not self.executors_update_event.is_set():
+            self._debug(
+                "executors_event",
+                "[DEX/CEX] controller tick skipped: waiting for executor update event",
+            )
+        await super().control_task()
+
+    def get_executor_config(
+        self,
+        level_id: str,
+        price: Decimal,
+        amount: Decimal,
+    ) -> Optional[PositionExecutorConfig]:
+        if price is None or amount is None or price <= 0 or amount <= 0:
+            return None
         trade_type = self.get_trade_type_from_level_id(level_id)
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
@@ -440,18 +607,3 @@ class PMMDynamicController(MarketMakingControllerBase):
             leverage=self.config.leverage,
             side=trade_type,
         )
-
-    def get_levels_to_execute(self) -> List[str]:
-        """
-        Override to prevent order placement when NATR exceeds upper limit.
-        Orders will automatically resume when NATR drops below the limit.
-        """
-        # Check if NATR exceeded the upper limit
-        if self.processed_data.get("natr_exceeded_limit", False):
-            # Return empty list to prevent order creation
-            # Note: This method is called continuously, so orders will resume
-            # automatically when natr_exceeded_limit becomes False
-            return []
-
-        # Call parent method for normal behavior when NATR is within limits
-        return super().get_levels_to_execute()
