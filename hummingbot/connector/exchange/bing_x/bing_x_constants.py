@@ -35,6 +35,7 @@ ACCOUNTS_PATH_URL = "/openApi/spot/v1/account/balance"
 MY_TRADES_PATH_URL = "/openApi/spot/v1/trade/query"
 ORDER_PATH_URL = "/openApi/spot/v1/trade/order"
 CANCEL_ORDER_PATH_URL = "/openApi/spot/v1/trade/cancel"
+CANCEL_OPEN_ORDERS_PATH_URL = "/openApi/spot/v1/trade/cancelOpenOrders"
 
 WS_HEARTBEAT_TIME_INTERVAL = 30
 
@@ -100,6 +101,9 @@ RATE_LIMITS = {
               linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
     RateLimit(limit_id=CANCEL_ORDER_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
+              linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
+                             LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
+    RateLimit(limit_id=CANCEL_OPEN_ORDERS_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
               linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
     RateLimit(limit_id=ACCOUNTS_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,

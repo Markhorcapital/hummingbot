@@ -3,6 +3,7 @@ from decimal import Decimal
 from test.isolated_asyncio_wrapper_test_case import IsolatedAsyncioWrapperTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from hummingbot.core.data_type.cancellation_result import CancellationResult
 from hummingbot.core.data_type.common import MarketDict, OrderType, PositionMode, TradeType
 from hummingbot.data_feed.market_data_provider import MarketDataProvider
 from hummingbot.strategy_v2.controllers.market_making_controller_base import (
@@ -454,3 +455,48 @@ class TestMarketMakingControllerBase(IsolatedAsyncioWrapperTestCase):
 
         # Should not include any rebalance actions
         self.assertEqual(len(actions), 0)
+
+    def test_determine_executor_actions_stops_before_creates(self):
+        stop_action = StopExecutorAction(controller_id="test", executor_id="stop-first")
+        create_action = CreateExecutorAction(
+            controller_id="test",
+            executor_config=OrderExecutorConfig(
+                timestamp=1234,
+                connector_name="binance_perpetual",
+                trading_pair="ETH-USDT",
+                execution_strategy=ExecutionStrategy.LIMIT,
+                side=TradeType.BUY,
+                amount=Decimal("1"),
+                price=Decimal("100"),
+                level_id="buy_0",
+                controller_id="test",
+            ),
+        )
+        with patch.object(self.controller, "stop_actions_proposal", return_value=[stop_action]):
+            with patch.object(self.controller, "create_actions_proposal", return_value=[create_action]):
+                actions = self.controller.determine_executor_actions()
+        self.assertEqual(actions, [stop_action, create_action])
+
+    async def test_maybe_cancel_open_orders_on_refresh(self):
+        mock_connector = MagicMock()
+        mock_connector.cancel_all_open_orders_for_trading_pair = AsyncMock(
+            return_value=[CancellationResult("oid-1", True)]
+        )
+        self.mock_market_data_provider.get_connector = MagicMock(return_value=mock_connector)
+        stop_action = StopExecutorAction(controller_id="test", executor_id="refresh-me")
+        with patch.object(self.controller, "executors_to_refresh", return_value=[stop_action]):
+            await self.controller._maybe_cancel_open_orders_before_refresh()
+        mock_connector.cancel_all_open_orders_for_trading_pair.assert_awaited_once_with(
+            trading_pair=self.mock_controller_config.trading_pair,
+            timeout_seconds=15.0,
+        )
+        self.assertTrue(self.controller._bulk_cancel_armed_for_refresh)
+
+    async def test_maybe_cancel_skipped_when_disabled(self):
+        self.mock_controller_config.cancel_open_orders_on_refresh = False
+        mock_connector = MagicMock()
+        mock_connector.cancel_all_open_orders_for_trading_pair = AsyncMock()
+        self.mock_market_data_provider.get_connector = MagicMock(return_value=mock_connector)
+        with patch.object(self.controller, "executors_to_refresh", return_value=[StopExecutorAction("test", "x")]):
+            await self.controller._maybe_cancel_open_orders_before_refresh()
+        mock_connector.cancel_all_open_orders_for_trading_pair.assert_not_called()

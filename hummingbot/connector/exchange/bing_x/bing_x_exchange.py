@@ -14,6 +14,7 @@ from hummingbot.connector.exchange.bing_x.bing_x_api_user_stream_data_source imp
 from hummingbot.connector.exchange.bing_x.bing_x_auth import BingXAuth
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
+from hummingbot.core.data_type.cancellation_result import CancellationResult
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
@@ -250,6 +251,36 @@ class BingXExchange(ExchangePyBase):
             await self._order_tracker.process_order_not_found(tracked_order.client_order_id)
 
             return False
+
+    async def cancel_all_open_orders_for_trading_pair(
+        self, trading_pair: str, timeout_seconds: float = 10.0
+    ) -> List[CancellationResult]:
+        """
+        Cancel all open spot orders for a symbol via BingX bulk cancel, then reconcile tracked orders.
+        """
+        try:
+            cancel_result = await self._api_post(
+                path_url=CONSTANTS.CANCEL_OPEN_ORDERS_PATH_URL,
+                params={"symbol": trading_pair},
+                is_auth_required=True,
+            )
+            if isinstance(cancel_result, dict) and cancel_result.get("code") != 0:
+                self.logger().warning(
+                    "BingX cancelOpenOrders for %s returned code=%s msg=%s",
+                    trading_pair,
+                    cancel_result.get("code"),
+                    cancel_result.get("msg"),
+                )
+        except Exception as e:
+            self.logger().warning(
+                "BingX cancelOpenOrders failed for %s: %s. Falling back to tracked order cancels.",
+                trading_pair,
+                e,
+            )
+        return await super().cancel_all_open_orders_for_trading_pair(
+            trading_pair=trading_pair,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         """
