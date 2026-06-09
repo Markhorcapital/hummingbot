@@ -389,6 +389,41 @@ class ExchangePyBase(ExchangeBase, ABC):
         failed_cancellations = [CancellationResult(oid, False) for oid in order_id_set]
         return successful_cancellations + failed_cancellations
 
+    async def cancel_all_open_orders_for_trading_pair(
+        self, trading_pair: str, timeout_seconds: float = 10.0
+    ) -> List[CancellationResult]:
+        """
+        Cancel open orders for a trading pair using tracked in-flight orders.
+        Exchanges may override to call a bulk cancel API (e.g. BingX cancelOpenOrders).
+        """
+        incomplete_orders = [
+            o for o in self.in_flight_orders.values()
+            if not o.is_done and o.trading_pair == trading_pair
+        ]
+        if not incomplete_orders:
+            return []
+        tasks = [self._execute_cancel(o.trading_pair, o.client_order_id) for o in incomplete_orders]
+        order_id_set = {o.client_order_id for o in incomplete_orders}
+        successful_cancellations = []
+        try:
+            async with timeout(timeout_seconds):
+                cancellation_results = await safe_gather(*tasks, return_exceptions=True)
+                for cr in cancellation_results:
+                    if isinstance(cr, Exception):
+                        continue
+                    client_order_id = cr
+                    if client_order_id is not None and client_order_id in order_id_set:
+                        order_id_set.remove(client_order_id)
+                        successful_cancellations.append(CancellationResult(client_order_id, True))
+        except Exception:
+            self.logger().network(
+                f"Unexpected error cancelling open orders for {trading_pair}.",
+                exc_info=True,
+                app_warning_msg="Failed to cancel open orders. Check API key and network connection.",
+            )
+        failed_cancellations = [CancellationResult(oid, False) for oid in order_id_set]
+        return successful_cancellations + failed_cancellations
+
     async def _create_order(self,
                             trade_type: TradeType,
                             order_id: str,

@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -23,6 +23,21 @@ class ArbitrageControllerConfig(ControllerConfigBase):
     max_executors_imbalance: int = 1
     rate_connector: str = "binance"
     quote_conversion_asset: str = "USDT"
+
+    # Auto-sizing pass-throughs forwarded to ArbitrageExecutorConfig. Defaults
+    # mirror the executor's defaults so leaving them unset preserves the
+    # original fixed-amount behaviour.
+    auto_size: bool = False
+    min_order_amount: Optional[Decimal] = None
+    max_order_amount: Optional[Decimal] = None
+    min_basis_bps: Decimal = Decimal("0")
+    min_net_profit_quote: Decimal = Decimal("0")
+    max_balance_pct: Decimal = Decimal("0.95")
+    max_slippage_pct: Decimal = Decimal("0.01")
+    max_drift_bps: Decimal = Decimal("30")
+    tiny_probe_amount: Optional[Decimal] = None
+    max_walk_levels: int = 8
+    k_cache_ttl: float = 30.0
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         return [markets.add_or_update(cp.connector_name, cp.trading_pair) for cp in [self.exchange_pair_1, self.exchange_pair_2]][-1]
@@ -118,6 +133,18 @@ class ArbitrageController(ControllerBase):
                 order_amount=amount_quantized,
                 min_profitability=self.config.min_profitability,
                 gas_conversion_price=gas_conversion_price,
+                # Auto-sizing pass-throughs (no-ops when auto_size is False).
+                auto_size=self.config.auto_size,
+                min_order_amount=self.config.min_order_amount,
+                max_order_amount=self.config.max_order_amount,
+                min_basis_bps=self.config.min_basis_bps,
+                min_net_profit_quote=self.config.min_net_profit_quote,
+                max_balance_pct=self.config.max_balance_pct,
+                max_slippage_pct=self.config.max_slippage_pct,
+                max_drift_bps=self.config.max_drift_bps,
+                tiny_probe_amount=self.config.tiny_probe_amount,
+                max_walk_levels=self.config.max_walk_levels,
+                k_cache_ttl=self.config.k_cache_ttl,
             )
             return CreateExecutorAction(
                 executor_config=arbitrage_config,

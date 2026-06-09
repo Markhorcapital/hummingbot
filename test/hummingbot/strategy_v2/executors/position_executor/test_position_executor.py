@@ -679,20 +679,10 @@ class TestPositionExecutor(IsolatedAsyncioWrapperTestCase):
         )
         position_executor._status = RunnableStatus.SHUTTING_DOWN
         await position_executor.control_task()
-        place_order_mock.assert_called_once()
-        position_executor._close_order = TrackedOrder("OID-SELL-1")
-        position_executor._close_order.order = InFlightOrder(
-            client_order_id="OID-SELL-1",
-            exchange_order_id="EOID4",
-            trading_pair=position_config.trading_pair,
-            order_type=position_config.triple_barrier_config.open_order_type,
-            trade_type=TradeType.SELL,
-            amount=position_config.amount,
-            price=position_config.entry_price,
-            creation_timestamp=1640001112.223,
-            initial_state=OrderState.OPEN
-        )
-        await position_executor.control_task()
+        place_order_mock.assert_not_called()
+        self.assertTrue(position_executor.is_closed)
+        self.assertEqual(position_executor.close_type, CloseType.POSITION_HOLD)
+        self.assertEqual(len(position_executor._held_position_orders), 1)
 
     @patch.object(PositionExecutor, "get_price")
     def test_is_within_activation_bounds_long(self, mock_price):

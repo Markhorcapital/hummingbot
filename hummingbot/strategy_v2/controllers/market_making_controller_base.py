@@ -115,6 +115,14 @@ class MarketMakingControllerConfigBase(ControllerConfigBase):
             "prompt_on_new": True, "is_updatable": True}
     )
     skip_rebalance: bool = Field(default=False)
+    cancel_open_orders_on_refresh: bool = Field(
+        default=True,
+        json_schema_extra={
+            "prompt": "Cancel all open orders for the pair before refreshing quotes (recommended): ",
+            "prompt_on_new": True,
+            "is_updatable": True,
+        },
+    )
 
     @field_validator("trailing_stop", mode="before")
     @classmethod
@@ -201,8 +209,12 @@ class MarketMakingControllerConfigBase(ControllerConfigBase):
         )
 
     def get_spreads_and_amounts_in_quote(self, trade_type: TradeType) -> Tuple[List[float], List[float]]:
-        buy_amounts_pct = getattr(self, 'buy_amounts_pct')
-        sell_amounts_pct = getattr(self, 'sell_amounts_pct')
+        buy_amounts_pct = getattr(self, 'buy_amounts_pct', None)
+        sell_amounts_pct = getattr(self, 'sell_amounts_pct', None)
+        if buy_amounts_pct is None:
+            buy_amounts_pct = [1 for _ in self.buy_spreads]
+        if sell_amounts_pct is None:
+            sell_amounts_pct = [1 for _ in self.sell_spreads]
 
         # Calculate total percentages across buys and sells
         total_pct = sum(buy_amounts_pct) + sum(sell_amounts_pct)
@@ -236,16 +248,66 @@ class MarketMakingControllerBase(ControllerBase):
     def __init__(self, config: MarketMakingControllerConfigBase, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         self.config = config
+        self._bulk_cancel_armed_for_refresh: bool = False
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_name, trading_pair=config.trading_pair)])
+
+    async def control_task(self):
+        if self.market_data_provider.ready and self.executors_update_event.is_set():
+            await self.update_processed_data()
+            await self._maybe_cancel_open_orders_before_refresh()
+            executor_actions: List[ExecutorAction] = self.determine_executor_actions()
+            if len(executor_actions) > 0:
+                self.logger().debug(f"Sending actions: {executor_actions}")
+                await self.send_actions(executor_actions)
+
+    async def _maybe_cancel_open_orders_before_refresh(self):
+        """
+        Bulk-cancel open orders on the exchange when a refresh cycle starts.
+        Clears orphans left after failed per-order cancels or lost-order handling.
+        """
+        if not self.config.cancel_open_orders_on_refresh:
+            return
+        if not self.executors_to_refresh():
+            self._bulk_cancel_armed_for_refresh = False
+            return
+        if self._bulk_cancel_armed_for_refresh:
+            return
+        self._bulk_cancel_armed_for_refresh = True
+        try:
+            connector = self.market_data_provider.get_connector(self.config.connector_name)
+            results = await connector.cancel_all_open_orders_for_trading_pair(
+                trading_pair=self.config.trading_pair,
+                timeout_seconds=15.0,
+            )
+            cancelled = sum(1 for r in results if r.success)
+            failed = len(results) - cancelled
+            if results:
+                self.logger().info(
+                    "Refresh cleanup: cancelled %s open order(s) on %s %s (%s failed).",
+                    cancelled,
+                    self.config.connector_name,
+                    self.config.trading_pair,
+                    failed,
+                )
+        except Exception as e:
+            self.logger().warning(
+                "Refresh cleanup: could not bulk-cancel open orders on %s %s: %s",
+                self.config.connector_name,
+                self.config.trading_pair,
+                e,
+            )
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """
         Determine actions based on the provided executor handler report.
+        Stop (and cancel) stale executors before creating new quotes.
         """
+        if not self.executors_to_refresh():
+            self._bulk_cancel_armed_for_refresh = False
         actions = []
-        actions.extend(self.create_actions_proposal())
         actions.extend(self.stop_actions_proposal())
+        actions.extend(self.create_actions_proposal())
         return actions
 
     def create_actions_proposal(self) -> List[ExecutorAction]:
