@@ -11,3 +11,4 @@ class ArbitrageExecutorConfig(ExecutorConfigBase):
     order_amount: Decimal
     min_profitability: Decimal
     gas_conversion_price: Optional[Decimal] = None
+    buy_only: bool = False

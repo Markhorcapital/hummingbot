@@ -23,6 +23,7 @@ class ArbitrageControllerConfig(ControllerConfigBase):
     max_executors_imbalance: int = 1
     rate_connector: str = "binance"
     quote_conversion_asset: str = "USDT"
+    buy_only: bool = False
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         return [markets.add_or_update(cp.connector_name, cp.trading_pair) for cp in [self.exchange_pair_1, self.exchange_pair_2]][-1]
@@ -119,6 +120,7 @@ class ArbitrageController(ControllerBase):
                 order_amount=amount_quantized,
                 min_profitability=self.config.min_profitability,
                 gas_conversion_price=gas_conversion_price,
+                buy_only=self.config.buy_only,
             )
             return CreateExecutorAction(
                 executor_config=arbitrage_config,

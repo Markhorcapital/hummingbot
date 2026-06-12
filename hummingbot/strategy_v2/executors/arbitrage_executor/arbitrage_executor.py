@@ -84,16 +84,17 @@ class ArbitrageExecutor(ExecutorBase):
         self._cumulative_failures = 0
 
     async def validate_sufficient_balance(self):
-        base_asset_for_selling_exchange = self.connectors[self.selling_market.connector_name].get_available_balance(
-            self.selling_market.trading_pair.split("-")[0])
-        if self.order_amount > base_asset_for_selling_exchange:
-            self.logger().info(f"Insufficient balance in exchange {self.selling_market.connector_name} "
-                               f"to sell {self.selling_market.trading_pair.split('-')[0]} "
-                               f"Actual: {base_asset_for_selling_exchange} --> Needed: {self.order_amount}")
-            self.close_type = CloseType.INSUFFICIENT_BALANCE
-            self.logger().error("Not enough budget to open position.")
-            self.stop()
-            return
+        if not self.config.buy_only:
+            base_asset_for_selling_exchange = self.connectors[self.selling_market.connector_name].get_available_balance(
+                self.selling_market.trading_pair.split("-")[0])
+            if self.order_amount > base_asset_for_selling_exchange:
+                self.logger().info(f"Insufficient balance in exchange {self.selling_market.connector_name} "
+                                   f"to sell {self.selling_market.trading_pair.split('-')[0]} "
+                                   f"Actual: {base_asset_for_selling_exchange} --> Needed: {self.order_amount}")
+                self.close_type = CloseType.INSUFFICIENT_BALANCE
+                self.logger().error("Not enough budget to open position.")
+                self.stop()
+                return
 
         price = await self.get_resulting_price_for_amount(
             exchange=self.buying_market.connector_name,
@@ -118,6 +119,8 @@ class ArbitrageExecutor(ExecutorBase):
 
     def get_net_pnl_quote(self) -> Decimal:
         if self.close_type == CloseType.COMPLETED:
+            if self.config.buy_only:
+                return Decimal("0")
             sell_quote_amount = self.sell_order.order.executed_amount_base * self.sell_order.average_executed_price
             buy_quote_amount = self.buy_order.order.executed_amount_base * self.buy_order.average_executed_price
             return sell_quote_amount - buy_quote_amount - self.cum_fees_quote
@@ -178,15 +181,20 @@ class ArbitrageExecutor(ExecutorBase):
         self.stop()
 
     def check_order_status(self):
-        if self.buy_order.order and self.buy_order.order.is_filled and \
-                self.sell_order.order and self.sell_order.order.is_filled:
+        buy_filled = self.buy_order.order and self.buy_order.order.is_filled
+        if self.config.buy_only:
+            if buy_filled:
+                self.close_type = CloseType.COMPLETED
+                self.stop()
+        elif buy_filled and self.sell_order.order and self.sell_order.order.is_filled:
             self.close_type = CloseType.COMPLETED
             self.stop()
 
     async def execute_arbitrage(self):
         self._status = RunnableStatus.SHUTTING_DOWN
         self.place_buy_arbitrage_order()
-        self.place_sell_arbitrage_order()
+        if not self.config.buy_only:
+            self.place_sell_arbitrage_order()
 
     def place_buy_arbitrage_order(self):
         self.buy_order.order_id = self.place_order(
@@ -219,15 +227,19 @@ class ArbitrageExecutor(ExecutorBase):
             order_amount=self.order_amount,
             asset=base_without_wrapped
         )
-        sell_fee = await self.get_tx_cost_in_asset(
-            exchange=self.selling_market.connector_name,
-            trading_pair=self.selling_market.trading_pair,
-            is_buy=False,
-            order_amount=self.order_amount,
-            asset=base_without_wrapped)
         self._last_buy_fee = buy_fee
-        self._last_sell_fee = sell_fee
-        self._last_tx_cost = self._last_buy_fee + self._last_sell_fee
+        if self.config.buy_only:
+            self._last_sell_fee = Decimal("0")
+            self._last_tx_cost = self._last_buy_fee
+        else:
+            sell_fee = await self.get_tx_cost_in_asset(
+                exchange=self.selling_market.connector_name,
+                trading_pair=self.selling_market.trading_pair,
+                is_buy=False,
+                order_amount=self.order_amount,
+                asset=base_without_wrapped)
+            self._last_sell_fee = sell_fee
+            self._last_tx_cost = self._last_buy_fee + self._last_sell_fee
 
     async def get_buy_and_sell_prices(self):
         buy_price_task = asyncio.create_task(self.get_resulting_price_for_amount(
@@ -309,12 +321,13 @@ class ArbitrageExecutor(ExecutorBase):
         if self.buy_order.order_id == event.order_id:
             self.place_buy_arbitrage_order()
             self._cumulative_failures += 1
-        elif self.sell_order.order_id == event.order_id:
+        elif not self.config.buy_only and self.sell_order.order_id == event.order_id:
             self.place_sell_arbitrage_order()
             self._cumulative_failures += 1
 
     def get_custom_info(self) -> Dict:
         return {
+            "buy_only": self.config.buy_only,
             "buy_connector": self.buying_market.connector_name,
             "sell_connector": self.selling_market.connector_name,
             "buy_pair": self.buying_market.trading_pair,
@@ -339,13 +352,26 @@ class ArbitrageExecutor(ExecutorBase):
             trade_pnl_pct = (self._last_sell_price - self._last_buy_price) / self._last_buy_price
             tx_cost_pct = self._last_tx_cost / self.order_amount
             base, quote = split_hb_trading_pair(trading_pair=self.buying_market.trading_pair)
+            mode = "Buy Only" if self.config.buy_only else "Full Arbitrage"
+            if self.config.buy_only:
+                trade_line = (
+                    f"- BUY: {self.buying_market.connector_name}:{self.buying_market.trading_pair} | "
+                    f"Reference: {self.selling_market.connector_name}:{self.selling_market.trading_pair} | "
+                    f"Amount: {self.order_amount:.2f}"
+                )
+            else:
+                trade_line = (
+                    f"- BUY: {self.buying_market.connector_name}:{self.buying_market.trading_pair}  --> "
+                    f"SELL: {self.selling_market.connector_name}:{self.selling_market.trading_pair} | "
+                    f"Amount: {self.order_amount:.2f}"
+                )
             lines.extend([f"""
-    Arbitrage Status: {self.status} | Close Type: {self.close_type}
-    - BUY: {self.buying_market.connector_name}:{self.buying_market.trading_pair}  --> SELL: {self.selling_market.connector_name}:{self.selling_market.trading_pair} | Amount: {self.order_amount:.2f}
+    Arbitrage Status: {self.status} | Mode: {mode} | Close Type: {self.close_type}
+    {trade_line}
     - Trade PnL (%): {trade_pnl_pct * 100:.2f} % | TX Cost (%): -{tx_cost_pct * 100:.2f} % | Net PnL (%): {(trade_pnl_pct - tx_cost_pct) * 100:.2f} %
     -------------------------------------------------------------------------------
     """])
-            if self.close_type == CloseType.COMPLETED:
+            if self.close_type == CloseType.COMPLETED and not self.config.buy_only:
                 lines.extend([f"Total Profit (%): {self.net_pnl_pct * 100:.2f} | Total Profit ({quote}): {self.net_pnl_quote:.4f}"])
             return lines
         else:
