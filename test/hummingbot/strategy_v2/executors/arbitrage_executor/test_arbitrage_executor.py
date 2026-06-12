@@ -24,6 +24,7 @@ class TestArbitrageExecutor(IsolatedAsyncioWrapperTestCase, LoggerMixinForTest):
         self.arbitrage_config.min_profitability = Decimal('0.01')
         self.arbitrage_config.order_amount = Decimal('1')
         self.arbitrage_config.max_retries = 3
+        self.arbitrage_config.buy_only = False
         self.update_interval = 0.5
         self.executor = ArbitrageExecutor(self.strategy, self.arbitrage_config, self.update_interval)
         self.set_loggers(loggers=[self.executor.logger()])
@@ -135,3 +136,56 @@ class TestArbitrageExecutor(IsolatedAsyncioWrapperTestCase, LoggerMixinForTest):
         )
         self.executor.process_order_failed_event("102", market, sell_order_failed_event)
         self.assertEqual(self.executor._cumulative_failures, 2)
+
+    @patch.object(ArbitrageExecutor, "place_order")
+    @patch.object(ArbitrageExecutor, "get_resulting_price_for_amount")
+    @patch.object(ArbitrageExecutor, "get_tx_cost_in_asset")
+    async def test_control_task_profitable_buy_only(self, tx_cost_mock, resulting_price_mock, place_order_mock):
+        self.arbitrage_config.buy_only = True
+        self.executor = ArbitrageExecutor(self.strategy, self.arbitrage_config, self.update_interval)
+        tx_cost_mock.return_value = Decimal('0.01')
+        resulting_price_mock.side_effect = [Decimal('100'), Decimal('104')]
+        place_order_mock.return_value = 'OID-BUY'
+        self.executor._status = RunnableStatus.RUNNING
+        await self.executor.control_task()
+        self.assertEqual(self.executor._status, RunnableStatus.SHUTTING_DOWN)
+        self.assertEqual(self.executor.buy_order.order_id, 'OID-BUY')
+        self.assertIsNone(self.executor.sell_order.order_id)
+        place_order_mock.assert_called_once()
+
+    async def test_control_task_complete_buy_only(self):
+        self.arbitrage_config.buy_only = True
+        self.executor = ArbitrageExecutor(self.strategy, self.arbitrage_config, self.update_interval)
+        self.executor._status = RunnableStatus.SHUTTING_DOWN
+        self.executor._cumulative_failures = 0
+        self.executor._buy_order = Mock(spec=TrackedOrder)
+        self.executor._buy_order.order.is_filled = True
+        await self.executor.control_task()
+        self.assertEqual(self.executor.close_type, CloseType.COMPLETED)
+        self.assertEqual(self.executor._status, RunnableStatus.TERMINATED)
+
+    @patch.object(ArbitrageExecutor, "get_resulting_price_for_amount")
+    async def test_validate_sufficient_balance_buy_only_skips_sell_balance(self, resulting_price_mock):
+        self.arbitrage_config.buy_only = True
+        self.executor = ArbitrageExecutor(self.strategy, self.arbitrage_config, self.update_interval)
+        self.strategy.connectors = {
+            "binance": MagicMock(spec=ConnectorBase),
+            "uniswap_polygon_mainnet": MagicMock(spec=ConnectorBase),
+        }
+        self.executor.connectors = self.strategy.connectors
+        resulting_price_mock.return_value = Decimal('100')
+        self.strategy.connectors["binance"].get_available_balance.return_value = Decimal('1000')
+        await self.executor.validate_sufficient_balance()
+        self.strategy.connectors["uniswap_polygon_mainnet"].get_available_balance.assert_not_called()
+        self.assertEqual(self.executor._status, RunnableStatus.NOT_STARTED)
+
+    @patch.object(ArbitrageExecutor, "get_tx_cost_in_asset")
+    async def test_update_tx_cost_buy_only(self, tx_cost_mock):
+        self.arbitrage_config.buy_only = True
+        self.executor = ArbitrageExecutor(self.strategy, self.arbitrage_config, self.update_interval)
+        tx_cost_mock.return_value = Decimal('0.05')
+        await self.executor.update_tx_cost()
+        self.assertEqual(self.executor._last_buy_fee, Decimal('0.05'))
+        self.assertEqual(self.executor._last_sell_fee, Decimal('0'))
+        self.assertEqual(self.executor._last_tx_cost, Decimal('0.05'))
+        tx_cost_mock.assert_called_once()
