@@ -59,6 +59,8 @@ class DexPriceSnapshot:
     basis_pct: Optional[Decimal] = None
     last_poll_ts: float = 0.0
     last_success_ts: float = 0.0
+    last_good_dex_fair: Optional[Decimal] = None
+    last_good_twap_source: TwapSource = TwapSource.NONE
     error: Optional[str] = None
 
 
@@ -189,8 +191,12 @@ class DexPriceFeed:
         basis_pct = compute_basis_pct(cex_mid, dex_fair)
 
         last_success_ts = self._snapshot.last_success_ts
+        last_good_dex_fair = self._snapshot.last_good_dex_fair
+        last_good_twap_source = self._snapshot.last_good_twap_source
         if dex_fair is not None:
             last_success_ts = now
+            last_good_dex_fair = dex_fair
+            last_good_twap_source = twap_source
 
         self._snapshot = DexPriceSnapshot(
             dex_fair=dex_fair,
@@ -203,6 +209,8 @@ class DexPriceFeed:
             basis_pct=basis_pct,
             last_poll_ts=now,
             last_success_ts=last_success_ts,
+            last_good_dex_fair=last_good_dex_fair,
+            last_good_twap_source=last_good_twap_source,
             error=error,
         )
 
@@ -238,7 +246,27 @@ class DexPriceFeed:
         return self._snapshot
 
     def get_dex_fair(self) -> Optional[Decimal]:
+        """Latest live poll dex_fair (None if the most recent poll failed)."""
         return self._snapshot.dex_fair
+
+    def get_quoting_dex_fair(self, now: Optional[float] = None) -> Optional[Decimal]:
+        """
+        Dex fair for live Regime A/B quotes: current poll if available, else last successful
+        TWAP while still inside dex_price_max_stale_seconds.
+        """
+        now = now or time.time()
+        if self.is_stale(now):
+            return None
+        if self._snapshot.dex_fair is not None:
+            return self._snapshot.dex_fair
+        return self._snapshot.last_good_dex_fair
+
+    def get_quoting_twap_source(self) -> TwapSource:
+        if self._snapshot.dex_fair is not None:
+            return self._snapshot.twap_source
+        if self._snapshot.last_good_dex_fair is not None:
+            return self._snapshot.last_good_twap_source
+        return TwapSource.NONE
 
     def is_stale(self, now: Optional[float] = None) -> bool:
         now = now or time.time()
@@ -246,8 +274,8 @@ class DexPriceFeed:
             return True
         return (now - self._snapshot.last_success_ts) > self.config.dex_price_max_stale_seconds
 
-    def sanity_ok(self, cex_mid: Decimal) -> bool:
-        dex_fair = self._snapshot.dex_fair
+    def sanity_ok(self, cex_mid: Decimal, now: Optional[float] = None) -> bool:
+        dex_fair = self.get_quoting_dex_fair(now)
         if dex_fair is None or dex_fair <= 0:
             return False
         divergence = abs(cex_mid - dex_fair) / dex_fair

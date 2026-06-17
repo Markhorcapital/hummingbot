@@ -34,3 +34,9 @@ class WebUtilsTests(TestCase):
         self.assertIsInstance(api_factory, WebAssistantsFactory)
         self.assertEqual(api_factory._throttler, self.throttler)
         self.assertEqual(len(api_factory._rest_pre_processors), 0)
+
+    def test_order_place_rate_limit_matches_bingx(self):
+        limits = {rate_limit.limit_id: rate_limit for rate_limit in CONSTANTS.RATE_LIMITS}
+        order_limit = limits[CONSTANTS.ORDER_PATH_URL]
+        self.assertEqual(order_limit.limit, CONSTANTS.MAX_ORDER_PLACE_REQUESTS_PER_SECOND)
+        self.assertEqual(order_limit.time_interval, CONSTANTS.ONE_SECOND)

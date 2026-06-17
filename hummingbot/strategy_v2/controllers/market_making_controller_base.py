@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 from pydantic import Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
@@ -249,6 +249,7 @@ class MarketMakingControllerBase(ControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config = config
         self._bulk_cancel_armed_for_refresh: bool = False
+        self._refresh_pending_executor_ids: Set[str] = set()
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_name, trading_pair=config.trading_pair)])
 
@@ -298,15 +299,33 @@ class MarketMakingControllerBase(ControllerBase):
                 e,
             )
 
+    def _register_refresh_targets(self) -> None:
+        for action in self.executors_to_refresh():
+            self._refresh_pending_executor_ids.add(action.executor_id)
+
+    def _has_active_refresh_executors(self) -> bool:
+        if not self._refresh_pending_executor_ids:
+            return False
+        active_ids = {executor.id for executor in self.executors_info if executor.is_active}
+        if not self._refresh_pending_executor_ids & active_ids:
+            self._refresh_pending_executor_ids.clear()
+            self._bulk_cancel_armed_for_refresh = False
+            return False
+        return True
+
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """
         Determine actions based on the provided executor handler report.
-        Stop (and cancel) stale executors before creating new quotes.
+        During a refresh cycle, stop (and cancel) stale executors first and defer
+        creates until none of the refresh targets are still active.
         """
+        self._register_refresh_targets()
+        actions: List[ExecutorAction] = []
+        actions.extend(self.stop_actions_proposal())
+        if self._has_active_refresh_executors():
+            return actions
         if not self.executors_to_refresh():
             self._bulk_cancel_armed_for_refresh = False
-        actions = []
-        actions.extend(self.stop_actions_proposal())
         actions.extend(self.create_actions_proposal())
         return actions
 
@@ -334,9 +353,23 @@ class MarketMakingControllerBase(ControllerBase):
         return create_actions
 
     def get_levels_to_execute(self) -> List[str]:
+        now = self.market_data_provider.time()
+        non_retryable_close_types = {CloseType.FAILED, CloseType.INSUFFICIENT_BALANCE}
         working_levels = self.filter_executors(
             executors=self.executors_info,
-            filter_func=lambda x: x.is_active or (x.close_type == CloseType.STOP_LOSS and self.market_data_provider.time() - x.close_timestamp < self.config.cooldown_time)
+            filter_func=lambda x: (
+                x.is_active
+                or (
+                    x.close_type == CloseType.STOP_LOSS
+                    and x.close_timestamp is not None
+                    and now - x.close_timestamp < self.config.cooldown_time
+                )
+                or (
+                    x.close_type in non_retryable_close_types
+                    and x.close_timestamp is not None
+                    and now - x.close_timestamp < self.config.executor_refresh_time
+                )
+            )
         )
         working_levels_ids = [executor.custom_info["level_id"] for executor in working_levels]
         return self.get_not_active_levels_ids(working_levels_ids)

@@ -137,6 +137,52 @@ class TestDexPriceFeed(unittest.TestCase):
         self.feed._snapshot.last_poll_ts = time.time()
         self.assertFalse(self.feed.should_poll())
 
+    def test_quoting_uses_last_good_when_poll_fails(self):
+        self.pool_reader.get_twap_base_in_quote.return_value = PoolTwapResult(
+            base_in_quote=Decimal("0.0005"),
+            avg_tick=-140000.0,
+            twap_seconds=60,
+            price_0_in_1=Decimal("0.0005"),
+        )
+        self.pool_reader.get_spot_base_in_quote.return_value = PoolSpotResult(
+            base_in_quote=Decimal("0.0005"),
+            tick=-140000,
+            sqrt_price_x96=1,
+            price_0_in_1=Decimal("0.0005"),
+        )
+        snap_ok = self.feed.poll(cex_mid=Decimal("1.0"))
+        expected_fair = Decimal("0.0005") * Decimal("2000")
+        self.assertEqual(snap_ok.dex_fair, expected_fair)
+        self.assertEqual(snap_ok.last_good_dex_fair, expected_fair)
+
+        self.pool_reader.get_twap_base_in_quote.side_effect = Exception("rpc down")
+        self.pool_reader.get_spot_base_in_quote.side_effect = Exception("rpc down")
+        self.mdp.get_price_by_type.side_effect = Exception("cex down")
+        snap_fail = self.feed.poll(cex_mid=Decimal("1.0"))
+        self.assertIsNone(snap_fail.dex_fair)
+        self.assertEqual(snap_fail.last_good_dex_fair, expected_fair)
+        self.assertEqual(self.feed.get_quoting_dex_fair(), expected_fair)
+        self.assertTrue(self.feed.sanity_ok(Decimal("1.04")))
+        self.assertEqual(self.feed.get_quoting_twap_source(), TwapSource.OBSERVE)
+
+    def test_quoting_none_when_stale_even_with_last_good(self):
+        self.pool_reader.get_twap_base_in_quote.return_value = PoolTwapResult(
+            base_in_quote=Decimal("0.0005"),
+            avg_tick=-140000.0,
+            twap_seconds=60,
+            price_0_in_1=Decimal("0.0005"),
+        )
+        self.pool_reader.get_spot_base_in_quote.return_value = PoolSpotResult(
+            base_in_quote=Decimal("0.0005"),
+            tick=-140000,
+            sqrt_price_x96=1,
+            price_0_in_1=Decimal("0.0005"),
+        )
+        self.feed.poll()
+        stale_now = time.time() + 31
+        self.assertIsNone(self.feed.get_quoting_dex_fair(now=stale_now))
+        self.assertFalse(self.feed.sanity_ok(Decimal("1.0"), now=stale_now))
+
 
 if __name__ == "__main__":
     unittest.main()
