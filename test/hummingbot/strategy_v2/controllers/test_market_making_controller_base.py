@@ -13,7 +13,9 @@ from hummingbot.strategy_v2.controllers.market_making_controller_base import (
 from hummingbot.strategy_v2.executors.data_types import PositionSummary
 from hummingbot.strategy_v2.executors.order_executor.data_types import ExecutionStrategy, OrderExecutorConfig
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TrailingStop
+from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
+from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 
@@ -477,6 +479,45 @@ class TestMarketMakingControllerBase(IsolatedAsyncioWrapperTestCase):
                 actions = self.controller.determine_executor_actions()
         self.assertEqual(actions, [stop_action, create_action])
 
+    def test_determine_executor_actions_blocks_create_during_refresh(self):
+        stop_action = StopExecutorAction(controller_id="test", executor_id="refresh-exec-1")
+        create_action = CreateExecutorAction(
+            controller_id="test",
+            executor_config=OrderExecutorConfig(
+                timestamp=1234,
+                connector_name="binance_perpetual",
+                trading_pair="ETH-USDT",
+                execution_strategy=ExecutionStrategy.LIMIT,
+                side=TradeType.BUY,
+                amount=Decimal("1"),
+                price=Decimal("100"),
+                level_id="buy_0",
+                controller_id="test",
+            ),
+        )
+        active_executor = ExecutorInfo(
+            id="refresh-exec-1",
+            timestamp=100.0,
+            type="position_executor",
+            status=RunnableStatus.RUNNING,
+            config=MagicMock(),
+            net_pnl_pct=Decimal("0"),
+            net_pnl_quote=Decimal("0"),
+            cum_fees_quote=Decimal("0"),
+            filled_amount_quote=Decimal("0"),
+            is_active=True,
+            is_trading=False,
+            custom_info={"level_id": "buy_0"},
+            close_timestamp=None,
+            close_type=None,
+            controller_id=self.controller.config.id,
+        )
+        self.controller.executors_info = [active_executor]
+        with patch.object(self.controller, "executors_to_refresh", return_value=[stop_action]):
+            with patch.object(self.controller, "create_actions_proposal", return_value=[create_action]):
+                actions = self.controller.determine_executor_actions()
+        self.assertEqual(actions, [stop_action])
+
     async def test_maybe_cancel_open_orders_on_refresh(self):
         mock_connector = MagicMock()
         mock_connector.cancel_all_open_orders_for_trading_pair = AsyncMock(
@@ -500,3 +541,51 @@ class TestMarketMakingControllerBase(IsolatedAsyncioWrapperTestCase):
         with patch.object(self.controller, "executors_to_refresh", return_value=[StopExecutorAction("test", "x")]):
             await self.controller._maybe_cancel_open_orders_before_refresh()
         mock_connector.cancel_all_open_orders_for_trading_pair.assert_not_called()
+
+    def test_get_levels_to_execute_blocks_recent_failed_level(self):
+        now = 1000.0
+        self.mock_market_data_provider.time.return_value = now
+        failed_executor = ExecutorInfo(
+            id="failed-buy-0",
+            timestamp=now - 10,
+            type="position_executor",
+            status=RunnableStatus.TERMINATED,
+            config=MagicMock(),
+            net_pnl_pct=Decimal("0"),
+            net_pnl_quote=Decimal("0"),
+            cum_fees_quote=Decimal("0"),
+            filled_amount_quote=Decimal("0"),
+            is_active=False,
+            is_trading=False,
+            custom_info={"level_id": "buy_0"},
+            close_timestamp=now - 30,
+            close_type=CloseType.INSUFFICIENT_BALANCE,
+            controller_id=self.controller.config.id,
+        )
+        self.controller.executors_info = [failed_executor]
+        levels = self.controller.get_levels_to_execute()
+        self.assertNotIn("buy_0", levels)
+
+    def test_get_levels_to_execute_allows_failed_level_after_refresh_time(self):
+        now = 1000.0
+        self.mock_market_data_provider.time.return_value = now
+        failed_executor = ExecutorInfo(
+            id="failed-buy-0",
+            timestamp=now - 200,
+            type="position_executor",
+            status=RunnableStatus.TERMINATED,
+            config=MagicMock(),
+            net_pnl_pct=Decimal("0"),
+            net_pnl_quote=Decimal("0"),
+            cum_fees_quote=Decimal("0"),
+            filled_amount_quote=Decimal("0"),
+            is_active=False,
+            is_trading=False,
+            custom_info={"level_id": "buy_0"},
+            close_timestamp=now - 301,
+            close_type=CloseType.FAILED,
+            controller_id=self.controller.config.id,
+        )
+        self.controller.executors_info = [failed_executor]
+        levels = self.controller.get_levels_to_execute()
+        self.assertIn("buy_0", levels)

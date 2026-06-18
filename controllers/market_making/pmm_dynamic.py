@@ -138,6 +138,7 @@ class PMMDynamicController(MarketMakingControllerBase):
     Uses Uniswap V3 pool TWAP (observe) × CEX ETH/USDT for dex_fair, then Regime A/B quoting.
     Phase 2: dex_cex_log_only=True keeps CEX mid ± spreads while logging feed/regime.
     Phase 3: dex_cex_log_only=False uses Regime A/B anchors; skips levels when feed stale or sanity fails.
+    Reuses last successful DEX TWAP for quoting when the current poll fails (within stale limit).
     """
 
     def __init__(self, config: PMMDynamicControllerConfig, *args, **kwargs):
@@ -399,13 +400,11 @@ class PMMDynamicController(MarketMakingControllerBase):
             )
 
         snap = self._dex_feed.snapshot if self._dex_feed else None
-        dex_fair = snap.dex_fair if snap else None
+        dex_fair = self._dex_feed.get_quoting_dex_fair(now) if self._dex_feed else None
         basis_pct = compute_basis_pct(cex_mid, dex_fair)
         regime = self._update_regime(basis_pct)
         feed_stale = self._dex_feed.is_stale(now) if self._dex_feed else True
-        feed_sanity_ok = (
-            self._dex_feed.sanity_ok(cex_mid) if self._dex_feed and dex_fair is not None else False
-        )
+        feed_sanity_ok = self._dex_feed.sanity_ok(cex_mid, now) if self._dex_feed else False
 
         self._log_feed_warnings(now, snap, feed_stale, feed_sanity_ok, dex_fair)
 
@@ -430,7 +429,11 @@ class PMMDynamicController(MarketMakingControllerBase):
             "regime": regime,
             "feed_stale": feed_stale,
             "feed_sanity_ok": feed_sanity_ok,
-            "twap_source": snap.twap_source.value if snap else TwapSource.NONE.value,
+            "twap_source": (
+                self._dex_feed.get_quoting_twap_source().value
+                if self._dex_feed
+                else TwapSource.NONE.value
+            ),
             "eth_usdt_mid": snap.eth_usdt_mid if snap else None,
             "spread_multiplier": Decimal("1"),
         }

@@ -186,6 +186,48 @@ class BingXExchange(ExchangePyBase):
 
         return amount.quantize(step_size, rounding=ROUND_DOWN)
 
+    @staticmethod
+    def _parse_spot_order_response(
+        order_result: Any,
+        action: str,
+        trading_pair: str,
+    ) -> Tuple[str, float]:
+        """
+        Parse BingX spot order API JSON. Success responses use code=0 with data.orderId.
+        Error responses use non-zero code and often omit or empty data — raise IOError with
+        the exchange message instead of KeyError.
+        """
+        if not isinstance(order_result, dict):
+            raise IOError(
+                f"BingX {action} for {trading_pair} returned unexpected response type: "
+                f"{type(order_result)}"
+            )
+
+        code = order_result.get("code")
+        if code != 0:
+            msg = order_result.get("msg", "")
+            debug_msg = order_result.get("debugMsg", "")
+            detail = f"code={code} msg={msg}"
+            if debug_msg:
+                detail += f" debugMsg={debug_msg}"
+            raise IOError(f"BingX {action} for {trading_pair} failed: {detail}")
+
+        data = order_result.get("data")
+        if not isinstance(data, dict):
+            raise IOError(
+                f"BingX {action} for {trading_pair} missing data field: {order_result}"
+            )
+
+        order_id = data.get("orderId")
+        if order_id is None:
+            raise IOError(
+                f"BingX {action} for {trading_pair} missing orderId in data: {order_result}"
+            )
+
+        transact_time_raw = data.get("transactTime")
+        transact_time = time.time() if transact_time_raw is None else int(transact_time_raw) * 1e-3
+        return str(order_id), transact_time
+
     async def _place_order(self,
                            order_id: str,
                            trading_pair: str,
@@ -218,9 +260,7 @@ class BingXExchange(ExchangePyBase):
             trading_pair=trading_pair,
         )
 
-        o_id = str(order_result["data"]["orderId"])
-        transact_time = int(order_result["data"]["transactTime"]) * 1e-3
-        return (o_id, transact_time)
+        return self._parse_spot_order_response(order_result, "place order", trading_pair)
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         api_params = {

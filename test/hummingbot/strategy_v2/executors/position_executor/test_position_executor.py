@@ -734,3 +734,72 @@ class TestPositionExecutor(IsolatedAsyncioWrapperTestCase):
         position_executor.early_stop(keep_position=True)
         self.assertEqual(position_executor.close_type, CloseType.POSITION_HOLD)
         self.assertEqual(position_executor.status, RunnableStatus.SHUTTING_DOWN)
+
+    # --- non-retryable failure tests ---
+
+    def test_is_non_retryable_failure_bingx_100202(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message="BingX place order for ALI-USDT failed: code=100202 msg=insufficient balance avail:65.92 require:192.0"
+        )
+        self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_is_non_retryable_failure_bingx_100410(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message="BingX rate limited (100410), waited 60s"
+        )
+        self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_is_non_retryable_failure_generic_network_error_is_retryable(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message="OSError: connection timed out"
+        )
+        self.assertFalse(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_is_non_retryable_failure_no_message_is_retryable(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+        )
+        self.assertFalse(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_process_order_failed_event_insufficient_balance_stops_immediately(self):
+        position_config = self.get_position_config_market_long()
+        position_executor = self.get_position_executor_running_from_config(position_config)
+        position_executor._open_order = TrackedOrder("OID-BUY-1")
+
+        position_executor.process_order_failed_event(
+            None, MagicMock(),
+            MarketOrderFailureEvent(
+                timestamp=1.0, order_id="OID-BUY-1", order_type=OrderType.LIMIT,
+                error_message="BingX place order failed: code=100202 msg=insufficient balance"
+            )
+        )
+
+        self.assertEqual(position_executor.close_type, CloseType.INSUFFICIENT_BALANCE)
+        # Executor must be SHUTTING_DOWN (not TERMINATED) so the normal shutdown
+        # process can cancel any in-flight orders before unregistering events.
+        self.assertEqual(position_executor.status, RunnableStatus.SHUTTING_DOWN)
+        self.assertEqual(position_executor._current_retries, 0)
+        self.assertIsNone(position_executor._open_order)
+        # close_timestamp must be set immediately so the controller filter blocks
+        # recreation of this level for executor_refresh_time seconds.
+        self.assertIsNotNone(position_executor.close_timestamp)
+
+    def test_process_order_failed_event_generic_error_does_retry(self):
+        position_config = self.get_position_config_market_long()
+        position_executor = self.get_position_executor_running_from_config(position_config)
+        position_executor._open_order = TrackedOrder("OID-BUY-1")
+
+        position_executor.process_order_failed_event(
+            None, MagicMock(),
+            MarketOrderFailureEvent(
+                timestamp=1.0, order_id="OID-BUY-1", order_type=OrderType.LIMIT,
+                error_message="OSError: connection timed out"
+            )
+        )
+
+        self.assertEqual(position_executor._current_retries, 1)
+        self.assertEqual(position_executor.status, RunnableStatus.RUNNING)
+        self.assertNotEqual(position_executor.close_type, CloseType.INSUFFICIENT_BALANCE)

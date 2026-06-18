@@ -690,6 +690,19 @@ class PositionExecutor(ExecutorBase):
             self._failed_orders.append(self._take_profit_limit_order)
             self._take_profit_limit_order = None
 
+    @staticmethod
+    def _is_non_retryable_failure(event: MarketOrderFailureEvent) -> bool:
+        error_message = (event.error_message or "").lower()
+        if not error_message:
+            return False
+        if "100202" in error_message or "100410" in error_message:
+            return True
+        if "insufficient" in error_message or "not enough balance" in error_message:
+            return True
+        if "avail:" in error_message and "require:" in error_message:
+            return True
+        return False
+
     def process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
         """
         This method is responsible for processing the order failed event. Here we will add the InFlightOrder to the
@@ -698,6 +711,14 @@ class PositionExecutor(ExecutorBase):
         if self._open_order and event.order_id == self._open_order.order_id:
             self._failed_orders.append(self._open_order)
             self._open_order = None
+            if self._is_non_retryable_failure(event):
+                self.close_type = CloseType.INSUFFICIENT_BALANCE
+                self._status = RunnableStatus.SHUTTING_DOWN
+                self.close_timestamp = self._strategy.current_timestamp
+                self.logger().error(
+                    f"Open order failed {event.order_id} with non-retryable error: {event.error_message}"
+                )
+                return
             self.logger().error(f"Open order failed {event.order_id}. Retrying {self._current_retries}/{self._max_retries}")
             self._current_retries += 1
         elif self._close_order and event.order_id == self._close_order.order_id:

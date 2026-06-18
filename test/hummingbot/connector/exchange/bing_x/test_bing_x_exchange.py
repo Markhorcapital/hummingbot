@@ -407,6 +407,43 @@ class TestBingXExchange(unittest.TestCase):
             )
         )
 
+    def test_parse_spot_order_response_raises_on_api_error(self):
+        with self.assertRaises(IOError) as ctx:
+            BingXExchange._parse_spot_order_response(
+                {"code": 80014, "msg": "timestamp is invalid", "data": {}},
+                "place order",
+                "ALI-USDT",
+            )
+        self.assertIn("80014", str(ctx.exception))
+        self.assertIn("timestamp is invalid", str(ctx.exception))
+        self.assertNotIn("'data'", str(ctx.exception))
+
+    def test_parse_spot_order_response_success(self):
+        order_id, transact_time = BingXExchange._parse_spot_order_response(
+            {
+                "code": 0,
+                "msg": "",
+                "data": {
+                    "orderId": 1719980066923872256,
+                    "transactTime": 1698910178296000,
+                },
+            },
+            "place order",
+            "ALI-USDT",
+        )
+        self.assertEqual("1719980066923872256", order_id)
+        self.assertEqual(1698910178296.0, transact_time)
+
+    def test_parse_spot_order_response_missing_data_raises_clear_error(self):
+        with self.assertRaises(IOError) as ctx:
+            BingXExchange._parse_spot_order_response(
+                {"code": 0, "msg": "", "data": {}},
+                "place order",
+                "ALI-USDT",
+            )
+        self.assertIn("missing orderId", str(ctx.exception))
+        self.assertNotIn("KeyError", str(ctx.exception))
+
     @aioresponses()
     def test_cancel_order_successfully(self, mock_api):
         request_sent_event = asyncio.Event()
@@ -467,6 +504,70 @@ class TestBingXExchange(unittest.TestCase):
                 f"Successfully canceled order {order.client_order_id}."
             )
         )
+
+    @aioresponses()
+    def test_request_order_status_uses_query_endpoint(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1735965009395131234",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+
+        url = web_utils.rest_url(CONSTANTS.MY_TRADES_PATH_URL)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.get(regex_url, body=json.dumps({
+            "code": 0,
+            "msg": "",
+            "data": {
+                "symbol": self.trading_pair,
+                "orderId": 1735965009395131234,
+                "status": "NEW",
+                "updateTime": 1698910178296,
+            },
+        }))
+
+        update = self.async_run_with_timeout(self.exchange._request_order_status(order))
+
+        self.assertEqual(update.new_state, OrderState.OPEN)
+        self.assertEqual(update.exchange_order_id, "1735965009395131234")
+        order_request = next(((key, value) for key, value in mock_api.requests.items()
+                              if key[1].human_repr().startswith(url)))
+        self._validate_auth_credentials_present(order_request[1][0])
+        request_params = order_request[1][0].kwargs["params"]
+        self.assertEqual(request_params["symbol"], self.trading_pair)
+        self.assertEqual(request_params["orderId"], "1735965009395131234")
+
+    @aioresponses()
+    def test_cancel_all_open_orders_bulk_success_marks_tracked_orders_canceled(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+        for idx, order_id in enumerate(["OID1", "OID2"], start=1):
+            self.exchange.start_tracking_order(
+                order_id=order_id,
+                exchange_order_id=str(idx),
+                trading_pair=self.trading_pair,
+                trade_type=TradeType.BUY,
+                price=Decimal("0.05"),
+                amount=Decimal("100"),
+                order_type=OrderType.LIMIT,
+            )
+
+        bulk_url = web_utils.rest_url(CONSTANTS.CANCEL_OPEN_ORDERS_PATH_URL)
+        bulk_regex = re.compile(f"^{bulk_url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.post(bulk_regex, body=json.dumps({"code": 0, "msg": "", "data": {}}))
+
+        results = self.async_run_with_timeout(
+            self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
+        )
+
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(result.success for result in results))
+        self.assertTrue(all(order.is_done for order in self.exchange.in_flight_orders.values()))
 
     @aioresponses()
     def test_update_balances(self, mock_api):
