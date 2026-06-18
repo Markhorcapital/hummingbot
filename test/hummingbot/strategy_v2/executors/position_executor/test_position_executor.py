@@ -751,6 +751,20 @@ class TestPositionExecutor(IsolatedAsyncioWrapperTestCase):
         )
         self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
 
+    def test_is_non_retryable_failure_gate_30004(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message='Gate.io place order failed: {"code":30004,"message":"Insufficient assets"}',
+        )
+        self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_is_non_retryable_failure_insufficient_assets(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message="Insufficient assets",
+        )
+        self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
+
     def test_is_non_retryable_failure_generic_network_error_is_retryable(self):
         event = MarketOrderFailureEvent(
             timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,

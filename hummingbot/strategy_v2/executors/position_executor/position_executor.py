@@ -695,9 +695,13 @@ class PositionExecutor(ExecutorBase):
         error_message = (event.error_message or "").lower()
         if not error_message:
             return False
-        if "100202" in error_message or "100410" in error_message:
+        if "100202" in error_message or "100410" in error_message or "30004" in error_message:
             return True
-        if "insufficient" in error_message or "not enough balance" in error_message:
+        if (
+            "insufficient" in error_message
+            or "insufficient assets" in error_message
+            or "not enough balance" in error_message
+        ):
             return True
         if "avail:" in error_message and "require:" in error_message:
             return True
