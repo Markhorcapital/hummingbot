@@ -3,7 +3,8 @@ import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from hummingbot.core.data_type.common import TradeType
+from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.event.events import BuyOrderCompletedEvent
 from hummingbot.strategy_v2.executors.convergence_executor.convergence_executor import ConvergenceExecutor
 from hummingbot.strategy_v2.executors.convergence_executor.data_types import ConvergenceExecutorConfig
 from hummingbot.strategy_v2.models.base import RunnableStatus
@@ -268,6 +269,36 @@ class TestConvergenceExecutorHelpers(unittest.TestCase):
         executor._cum_fees_quote = Decimal("0.5")
         executor._order = None
         self.assertEqual(executor.get_cum_fees_quote(), Decimal("0.5"))
+
+    def test_get_net_pnl_pct_tolerates_nan_filled_quote(self):
+        executor = ConvergenceExecutor.__new__(ConvergenceExecutor)
+        executor._last_dex_fair = Decimal("0.0014")
+        executor._total_filled_base = Decimal("1000")
+        executor._total_filled_quote = Decimal("NaN")
+        executor._sweep_side = TradeType.BUY
+        executor._cum_fees_quote = Decimal("0")
+        executor._order = None
+        self.assertEqual(executor.get_net_pnl_pct(), Decimal("0"))
+        self.assertEqual(executor.get_net_pnl_quote(), Decimal("0"))
+        self.assertEqual(executor.filled_amount_quote, Decimal("0"))
+
+    def test_chunk_fill_quote_uses_completed_event_quote_not_nan_price(self):
+        executor = ConvergenceExecutor.__new__(ConvergenceExecutor)
+        tracked = MagicMock()
+        tracked.order = MagicMock()
+        tracked.order.executed_amount_base = Decimal("1000")
+        tracked.order.executed_amount_quote = Decimal("0")
+        tracked.average_executed_price = Decimal("NaN")
+        event = BuyOrderCompletedEvent(
+            timestamp=1.0,
+            order_id="oid",
+            base_asset="ALI",
+            quote_asset="USDT",
+            base_asset_amount=Decimal("1000"),
+            quote_asset_amount=Decimal("1.33"),
+            order_type=OrderType.MARKET,
+        )
+        self.assertEqual(executor._chunk_fill_quote(event, tracked), Decimal("1.33"))
 
     def test_running_step_waits_when_gap_not_widening(self):
         executor = ConvergenceExecutor.__new__(ConvergenceExecutor)

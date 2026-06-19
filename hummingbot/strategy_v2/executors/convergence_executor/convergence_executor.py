@@ -80,6 +80,37 @@ class ConvergenceExecutor(ExecutorBase):
         return getattr(self.config, "id", None) or "?"
 
     @staticmethod
+    def _is_positive_finite(val: Optional[Decimal]) -> bool:
+        """True when val is a usable positive Decimal (not None/NaN/<=0)."""
+        if val is None:
+            return False
+        if val.is_nan():
+            return False
+        return val > 0
+
+    @staticmethod
+    def _sanitize_quote_amount(val: Optional[Decimal]) -> Decimal:
+        if val is None or val.is_nan() or val < 0:
+            return Decimal("0")
+        return val
+
+    def _chunk_fill_quote(
+        self,
+        event: Union[BuyOrderCompletedEvent, SellOrderCompletedEvent],
+        tracked: TrackedOrder,
+    ) -> Decimal:
+        """Quote notional for a completed chunk; avoid NaN from market-order price fallback."""
+        if self._is_positive_finite(event.quote_asset_amount):
+            return event.quote_asset_amount
+        if tracked.order and self._is_positive_finite(tracked.order.executed_amount_quote):
+            return tracked.order.executed_amount_quote
+        base = tracked.order.executed_amount_base if tracked.order else Decimal("0")
+        avg = tracked.average_executed_price
+        if self._is_positive_finite(base) and self._is_positive_finite(avg):
+            return base * avg
+        return Decimal("0")
+
+    @staticmethod
     def _abs_gap_bps(cex_mid: Optional[Decimal], dex_fair: Optional[Decimal]) -> Optional[Decimal]:
         if cex_mid is None or dex_fair is None or dex_fair <= 0:
             return None
@@ -686,9 +717,7 @@ class ConvergenceExecutor(ExecutorBase):
             self._order.order = self.get_in_flight_order(self.config.connector_name, event.order_id)
             if self._order.order:
                 self._total_filled_base += self._order.order.executed_amount_base
-                self._total_filled_quote += (
-                    self._order.order.executed_amount_base * self._order.average_executed_price
-                )
+                self._total_filled_quote += self._chunk_fill_quote(event, self._order)
                 self._cum_fees_quote += self._order.cum_fees_quote
                 self._append_held_order_if_new(self._order)
             chunk_filled_base = (
@@ -720,7 +749,11 @@ class ConvergenceExecutor(ExecutorBase):
 
     # ------------------------------------------------------------------ pnl / status
     def get_net_pnl_quote(self) -> Decimal:
-        if self._last_dex_fair is None or self._total_filled_base <= 0:
+        if self._last_dex_fair is None:
+            return Decimal("0")
+        if not self._is_positive_finite(self._total_filled_base):
+            return Decimal("0")
+        if not self._is_positive_finite(self._total_filled_quote):
             return Decimal("0")
         avg_price = self._total_filled_quote / self._total_filled_base
         if self._sweep_side == TradeType.BUY:
@@ -732,9 +765,9 @@ class ConvergenceExecutor(ExecutorBase):
         return mark_pnl - self.get_cum_fees_quote()
 
     def get_net_pnl_pct(self) -> Decimal:
-        if self._total_filled_quote > 0:
-            return self.get_net_pnl_quote() / self._total_filled_quote
-        return Decimal("0")
+        if not self._is_positive_finite(self._total_filled_quote):
+            return Decimal("0")
+        return self.get_net_pnl_quote() / self._total_filled_quote
 
     def get_cum_fees_quote(self) -> Decimal:
         in_flight = Decimal("0")
@@ -744,7 +777,7 @@ class ConvergenceExecutor(ExecutorBase):
 
     @property
     def filled_amount_quote(self) -> Decimal:
-        return self._total_filled_quote
+        return self._sanitize_quote_amount(self._total_filled_quote)
 
     def get_custom_info(self) -> Dict:
         return {
