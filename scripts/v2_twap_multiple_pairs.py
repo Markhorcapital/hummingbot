@@ -1,10 +1,10 @@
 import os
 import time
-from typing import Dict, List, Set
+from decimal import Decimal
+from typing import Dict, List, Optional, Set
 
 from pydantic import Field, field_validator
 
-from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.clock import Clock
 from hummingbot.core.data_type.common import PositionMode, TradeType
@@ -27,6 +27,27 @@ class TWAPMultiplePairsConfig(StrategyV2ConfigBase):
         default="binance,WLD-USDT,BUY,1,100,60,15,TAKER",
         json_schema_extra={
             "prompt": "Enter the TWAP configurations (e.g. connector,trading_pair,side,leverage,total_amount_quote,total_duration,order_interval,mode:same_for_other_config): ",
+            "prompt_on_new": True})
+    # Applied to every TWAP executor unless already set on that executor config.
+    volume_threshold_usd: Optional[Decimal] = Field(
+        default=None,
+        json_schema_extra={
+            "prompt": "CoinGecko pair volume USD threshold (empty to disable): ",
+            "prompt_on_new": True})
+    coingecko_coin_id: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "prompt": "CoinGecko coin id for volume checks (e.g. bitcoin): ",
+            "prompt_on_new": True})
+    trade_when_volume_below: bool = Field(
+        default=True,
+        json_schema_extra={
+            "prompt": "Trade only when volume is below threshold? (True/False): ",
+            "prompt_on_new": True})
+    skip_on_volume_api_error: bool = Field(
+        default=True,
+        json_schema_extra={
+            "prompt": "Skip order if CoinGecko volume API fails? (True/False): ",
             "prompt_on_new": True})
 
     @field_validator("twap_configs", mode="before")
@@ -95,12 +116,21 @@ class TWAPMultiplePairs(StrategyV2Base):
             if self.is_perpetual(config.connector_name):
                 self.connectors[config.connector_name].set_leverage(config.trading_pair, config.leverage)
 
+    def _apply_volume_gate_settings(self, config: TWAPExecutorConfig) -> None:
+        if config.volume_threshold_usd is None and self.config.volume_threshold_usd is not None:
+            config.volume_threshold_usd = self.config.volume_threshold_usd
+        if not config.coingecko_coin_id and self.config.coingecko_coin_id:
+            config.coingecko_coin_id = self.config.coingecko_coin_id
+        config.trade_when_volume_below = self.config.trade_when_volume_below
+        config.skip_on_volume_api_error = self.config.skip_on_volume_api_error
+
     def determine_executor_actions(self) -> List[ExecutorAction]:
         executor_actions = []
         if not self.twaps_created:
             self.twaps_created = True
             for config in self.config.twap_configs:
                 config.timestamp = self.current_timestamp
+                self._apply_volume_gate_settings(config)
                 executor_actions.append(CreateExecutorAction(executor_config=config))
         return executor_actions
 

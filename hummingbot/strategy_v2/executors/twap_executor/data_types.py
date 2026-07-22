@@ -28,6 +28,15 @@ class TWAPExecutorConfig(ExecutorConfigBase):
     limit_order_buffer: Optional[Decimal] = None
     order_resubmission_time: Optional[int] = None
 
+    # CoinGecko volume gate (optional). When both threshold and coin_id are set,
+    # each child order is allowed only if exchange pair volume passes the rule.
+    volume_threshold_usd: Optional[Decimal] = None
+    coingecko_coin_id: Optional[str] = None
+    # True: trade only when volume < threshold. False: trade only when volume >= threshold.
+    trade_when_volume_below: bool = True
+    # If CoinGecko call fails, skip the child order (safer default).
+    skip_on_volume_api_error: bool = True
+
     @model_validator(mode="after")
     def validate_mode_config(self):
         """Validate mode-specific requirements"""
@@ -38,6 +47,10 @@ class TWAPExecutorConfig(ExecutorConfigBase):
     @property
     def is_maker(self) -> bool:
         return self.mode == TWAPMode.MAKER
+
+    @property
+    def volume_check_enabled(self) -> bool:
+        return self.volume_threshold_usd is not None and bool(self.coingecko_coin_id)
 
     @property
     def number_of_orders(self) -> int:

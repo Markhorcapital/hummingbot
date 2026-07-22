@@ -16,9 +16,12 @@ from hummingbot.core.event.events import (
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
+from hummingbot.strategy_v2.executors.twap_executor.coingecko_volume import CoinGeckoVolumeClient
 from hummingbot.strategy_v2.executors.twap_executor.data_types import TWAPExecutorConfig
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
+
+VOLUME_SKIPPED_PREFIX = "VOLUME_SKIPPED"
 
 
 class TWAPExecutor(ExecutorBase):
@@ -90,25 +93,25 @@ class TWAPExecutor(ExecutorBase):
 
     async def control_task(self):
         if self.status == RunnableStatus.RUNNING:
-            self.evaluate_create_order()
-            self.evaluate_refresh_orders()
+            await self.evaluate_create_order()
+            await self.evaluate_refresh_orders()
             self.evaluate_all_orders_completed()
             self.evaluate_max_retries()
         elif self.status == RunnableStatus.SHUTTING_DOWN:
             await self.evaluate_all_orders_closed()
 
-    def evaluate_create_order(self):
+    async def evaluate_create_order(self):
         for timestamp, tracked_order in self._order_plan.items():
             if self._strategy.current_timestamp >= timestamp and tracked_order is None:
-                self.create_order(timestamp)
+                await self.create_order(timestamp)
 
-    def evaluate_refresh_orders(self):
+    async def evaluate_refresh_orders(self):
         if self.config.is_maker:
             for timestamp, tracked_order in self._order_plan.items():
                 if self.refresh_order_condition(tracked_order):
                     self._strategy.cancel(self.config.connector_name, self.config.trading_pair, tracked_order.order_id)
                     self._refreshed_orders.append(tracked_order)
-                    self.create_order(timestamp)
+                    await self.create_order(timestamp)
 
     def refresh_order_condition(self, tracked_order: TrackedOrder):
         if self.config.order_resubmission_time:
@@ -122,7 +125,67 @@ class TWAPExecutor(ExecutorBase):
         if self._current_retries > self._max_retries:
             self.close_execution_by(CloseType.FAILED)
 
-    def create_order(self, timestamp):
+    @staticmethod
+    def is_volume_skipped(tracked_order: Optional[TrackedOrder]) -> bool:
+        return bool(
+            tracked_order
+            and tracked_order.order_id
+            and str(tracked_order.order_id).startswith(VOLUME_SKIPPED_PREFIX)
+        )
+
+    def _is_order_slot_complete(self, tracked_order: Optional[TrackedOrder]) -> bool:
+        if tracked_order is None:
+            return False
+        if self.is_volume_skipped(tracked_order):
+            return True
+        return bool(tracked_order.order and tracked_order.order.is_filled)
+
+    async def _volume_allows_trade(self) -> bool:
+        """
+        Returns True if this child order should be placed based on CoinGecko pair volume.
+        Rule (default): trade only when volume < threshold.
+        """
+        if not self.config.volume_check_enabled:
+            return True
+
+        volume = await CoinGeckoVolumeClient.get_pair_volume_usd(
+            connector_name=self.config.connector_name,
+            trading_pair=self.config.trading_pair,
+            coin_id=self.config.coingecko_coin_id,
+        )
+        if volume is None:
+            self.logger().warning(
+                f"Volume check unavailable for {self.config.connector_name} "
+                f"{self.config.trading_pair}; "
+                f"{'skipping' if self.config.skip_on_volume_api_error else 'allowing'} order."
+            )
+            return not self.config.skip_on_volume_api_error
+
+        threshold = self.config.volume_threshold_usd
+        if self.config.trade_when_volume_below:
+            allowed = volume < threshold
+            rule_desc = f"volume {volume} < threshold {threshold}"
+        else:
+            allowed = volume >= threshold
+            rule_desc = f"volume {volume} >= threshold {threshold}"
+
+        if allowed:
+            self.logger().info(
+                f"Volume check passed for {self.config.connector_name} "
+                f"{self.config.trading_pair}: {rule_desc}. Placing order."
+            )
+        else:
+            self.logger().info(
+                f"Volume check failed for {self.config.connector_name} "
+                f"{self.config.trading_pair}: {rule_desc}. Skipping order."
+            )
+        return allowed
+
+    async def create_order(self, timestamp):
+        if not await self._volume_allows_trade():
+            self._order_plan[timestamp] = TrackedOrder(order_id=f"{VOLUME_SKIPPED_PREFIX}-{timestamp}")
+            return
+
         price = self.get_price(self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
         total_executed_amount = self.get_total_executed_amount_quote()
         open_orders_open_amount = sum([order.order.amount * order.order.price for order in self._order_plan.values() if order and order.order and not order.is_done])
@@ -192,14 +255,20 @@ class TWAPExecutor(ExecutorBase):
 
     def evaluate_all_orders_completed(self):
         if self.evaluate_all_orders_created():
-            if all([order.order.is_filled for order in self._order_plan.values() if order and order.order]):
-                # Instead of shutting down, reset and start again for continuous execution
-                self._start_timestamp = self._strategy.current_timestamp
+            if all(self._is_order_slot_complete(order) for order in self._order_plan.values()):
+                # If every slot was skipped by volume gate, delay the next cycle
+                # so we do not spam CoinGecko every tick.
+                all_skipped = all(self.is_volume_skipped(order) for order in self._order_plan.values())
+                delay = self.config.order_interval if all_skipped else 0
+                self._start_timestamp = self._strategy.current_timestamp + delay
                 self._order_plan = self.create_order_plan()
                 self._failed_orders = []
                 self._refreshed_orders = []
                 # Keep status as RUNNING to continue looping
-                self.logger().info("All orders completed. Restarting TWAP cycle.")
+                self.logger().info(
+                    "All orders completed. Restarting TWAP cycle"
+                    + (f" after {delay}s (all volume-skipped)." if all_skipped else ".")
+                )
 
     def evaluate_all_orders_created(self):
         return all([order for order in self._order_plan.values()])
