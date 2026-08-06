@@ -532,15 +532,50 @@ class TestMarketMakingControllerBase(IsolatedAsyncioWrapperTestCase):
             timeout_seconds=15.0,
         )
         self.assertTrue(self.controller._bulk_cancel_armed_for_refresh)
+        self.assertTrue(self.controller._skip_cancel_on_refresh_stop)
+
+    async def test_maybe_cancel_sets_skip_false_when_bulk_partially_fails(self):
+        mock_connector = MagicMock()
+        mock_connector.cancel_all_open_orders_for_trading_pair = AsyncMock(
+            return_value=[
+                CancellationResult("oid-1", True),
+                CancellationResult("oid-2", False),
+            ]
+        )
+        self.mock_market_data_provider.get_connector = MagicMock(return_value=mock_connector)
+        with patch.object(
+            self.controller,
+            "executors_to_refresh",
+            return_value=[StopExecutorAction(controller_id="test", executor_id="refresh-me")],
+        ):
+            await self.controller._maybe_cancel_open_orders_before_refresh()
+        self.assertFalse(self.controller._skip_cancel_on_refresh_stop)
+
+    def test_executors_to_refresh_propagates_skip_order_cancel(self):
+        now = 1000.0
+        self.mock_market_data_provider.time.return_value = now
+        self.controller._skip_cancel_on_refresh_stop = True
+        executor = MagicMock()
+        executor.id = "refresh-exec-1"
+        with patch.object(self.controller, "filter_executors", return_value=[executor]):
+            actions = self.controller.executors_to_refresh()
+        self.assertEqual(1, len(actions))
+        self.assertTrue(actions[0].skip_order_cancel)
+        self.assertEqual("refresh-exec-1", actions[0].executor_id)
 
     async def test_maybe_cancel_skipped_when_disabled(self):
         self.mock_controller_config.cancel_open_orders_on_refresh = False
         mock_connector = MagicMock()
         mock_connector.cancel_all_open_orders_for_trading_pair = AsyncMock()
         self.mock_market_data_provider.get_connector = MagicMock(return_value=mock_connector)
-        with patch.object(self.controller, "executors_to_refresh", return_value=[StopExecutorAction("test", "x")]):
+        with patch.object(
+            self.controller,
+            "executors_to_refresh",
+            return_value=[StopExecutorAction(controller_id="test", executor_id="x")],
+        ):
             await self.controller._maybe_cancel_open_orders_before_refresh()
         mock_connector.cancel_all_open_orders_for_trading_pair.assert_not_called()
+        self.assertFalse(self.controller._skip_cancel_on_refresh_stop)
 
     def test_get_levels_to_execute_blocks_recent_failed_level(self):
         now = 1000.0

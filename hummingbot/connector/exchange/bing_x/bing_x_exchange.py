@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from decimal import ROUND_DOWN, Decimal
 from types import MethodType
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 s_logger = None
 s_decimal_NaN = Decimal("nan")
+_UNBLOCK_AFTER_RE = re.compile(r"unblocked after\s+(\d+)", re.IGNORECASE)
 
 
 class BingXExchange(ExchangePyBase):
@@ -48,6 +50,7 @@ class BingXExchange(ExchangePyBase):
         self._trading_required = trading_required
         self._trading_pairs = trading_pairs
         self._last_trades_poll_bingx_timestamp = 1.0
+        self._order_endpoint_unblocked_at: float = 0.0
         super().__init__(client_config_map)
 
     @staticmethod
@@ -230,6 +233,40 @@ class BingXExchange(ExchangePyBase):
         transact_time = time.time() if transact_time_raw is None else int(transact_time_raw) * 1e-3
         return str(order_id), transact_time
 
+    @staticmethod
+    def _is_order_rate_limit_error(error: BaseException) -> bool:
+        message = str(error).lower()
+        return (
+            "100410" in message
+            or "disabled period" in message
+            or "rate limited" in message
+            or "frequency limit" in message
+        )
+
+    def _note_order_endpoint_rate_limit(self, error: BaseException) -> None:
+        """Record when BingX will accept place/cancel again after a 100410 ban."""
+        message = str(error)
+        match = _UNBLOCK_AFTER_RE.search(message)
+        if match:
+            unblock_at = int(match.group(1)) / 1000.0
+        else:
+            unblock_at = time.time() + CONSTANTS.ORDER_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS
+        if unblock_at > self._order_endpoint_unblocked_at:
+            self._order_endpoint_unblocked_at = unblock_at
+            wait_s = max(0.0, unblock_at - time.time())
+            self.logger().warning(
+                "BingX order endpoint rate-limited (100410); pausing places for %.1fs until %.0f",
+                wait_s,
+                unblock_at,
+            )
+
+    async def _wait_if_order_endpoint_rate_limited(self) -> None:
+        wait_s = self._order_endpoint_unblocked_at - time.time()
+        if wait_s <= 0:
+            return
+        # Small buffer so we do not hit the endpoint on the exact unblock tick.
+        await asyncio.sleep(wait_s + 0.5)
+
     async def _place_order(self,
                            order_id: str,
                            trading_pair: str,
@@ -255,14 +292,32 @@ class BingXExchange(ExchangePyBase):
             # bing x not has GTC
             pass
 
+        await self._wait_if_order_endpoint_rate_limited()
         order_result = await self._api_post(
             path_url=CONSTANTS.ORDER_PATH_URL,
             params=api_params,
             is_auth_required=True,
             trading_pair=trading_pair,
         )
-
-        return self._parse_spot_order_response(order_result, "place order", trading_pair)
+        try:
+            return self._parse_spot_order_response(order_result, "place order", trading_pair)
+        except IOError as place_error:
+            if not self._is_order_rate_limit_error(place_error):
+                raise
+            self._note_order_endpoint_rate_limit(place_error)
+            await self._wait_if_order_endpoint_rate_limited()
+            order_result = await self._api_post(
+                path_url=CONSTANTS.ORDER_PATH_URL,
+                params=api_params,
+                is_auth_required=True,
+                trading_pair=trading_pair,
+            )
+            try:
+                return self._parse_spot_order_response(order_result, "place order", trading_pair)
+            except IOError as retry_error:
+                if self._is_order_rate_limit_error(retry_error):
+                    self._note_order_endpoint_rate_limit(retry_error)
+                raise
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         api_params = {
@@ -313,9 +368,9 @@ class BingXExchange(ExchangePyBase):
         """
         Cancel all open spot orders for a symbol via BingX bulk cancel, then reconcile tracked orders.
 
-        On successful cancelOpenOrders, mark tracked orders canceled locally and refresh balances
-        so the strategy sees freed funds before recreating quotes. Fall back to per-order cancel
-        only when the bulk call fails.
+        On successful cancelOpenOrders, mark tracked orders canceled locally, wait briefly for
+        BingX to free locked balances, then refresh balances so the strategy sees freed funds
+        before recreating quotes. Fall back to per-order cancel only when the bulk call fails.
         """
         incomplete_orders = [
             o for o in self.in_flight_orders.values()
@@ -348,7 +403,7 @@ class BingXExchange(ExchangePyBase):
             now = time.time()
             results: List[CancellationResult] = []
             for order in incomplete_orders:
-                self._order_tracker.process_order_update(OrderUpdate(
+                await self._order_tracker._process_order_update(OrderUpdate(
                     client_order_id=order.client_order_id,
                     exchange_order_id=order.exchange_order_id,
                     trading_pair=order.trading_pair,
@@ -356,6 +411,7 @@ class BingXExchange(ExchangePyBase):
                     new_state=OrderState.CANCELED,
                 ))
                 results.append(CancellationResult(order.client_order_id, True))
+            await asyncio.sleep(CONSTANTS.POST_CANCEL_BALANCE_DELAY_SECONDS)
             try:
                 await self._update_balances()
             except Exception as e:

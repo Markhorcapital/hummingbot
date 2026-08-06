@@ -314,8 +314,13 @@ class XEMMExecutor(ExecutorBase):
             "order_amount": self.config.order_amount,
         }
 
-    def early_stop(self, keep_position: bool = False):
-        if self.maker_order and self.maker_order.order and self.maker_order.order.is_open:
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
+        if (
+            not skip_order_cancel
+            and self.maker_order
+            and self.maker_order.order
+            and self.maker_order.order.is_open
+        ):
             self.logger().info(f"Cancelling maker order {self.maker_order.order_id}.")
             self._strategy.cancel(self.maker_connector, self.maker_trading_pair, self.maker_order.order_id)
         self.close_type = CloseType.EARLY_STOP
@@ -359,8 +364,8 @@ class XEMMExecutor(ExecutorBase):
 Maker Side: {self.maker_order_side}
 -----------------------------------------------------------------------------------------------------------------------
     - Maker: {self.maker_connector} {self.maker_trading_pair} | Taker: {self.taker_connector} {self.taker_trading_pair}
-    - Min profitability: {self.config.min_profitability*100:.2f}% | Target profitability: {self.config.target_profitability*100:.2f}% | Max profitability: {self.config.max_profitability*100:.2f}% | Current profitability: {(self._current_trade_profitability - self._tx_cost_pct)*100:.2f}%
-    - Trade profitability: {self._current_trade_profitability*100:.2f}% | Tx cost: {self._tx_cost_pct*100:.2f}%
+    - Min profitability: {self.config.min_profitability * 100:.2f}% | Target profitability: {self.config.target_profitability * 100:.2f}% | Max profitability: {self.config.max_profitability * 100:.2f}% | Current profitability: {(self._current_trade_profitability - self._tx_cost_pct) * 100:.2f}%
+    - Trade profitability: {self._current_trade_profitability * 100:.2f}% | Tx cost: {self._tx_cost_pct * 100:.2f}%
     - Taker result price: {self._taker_result_price:.3f} | Tx cost: {self._tx_cost:.3f} {self.maker_trading_pair.split('-')[-1]} | Order amount (Base): {self.config.order_amount:.2f}
 -----------------------------------------------------------------------------------------------------------------------
 """

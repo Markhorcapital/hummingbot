@@ -417,7 +417,10 @@ class ExecutorOrchestrator:
         if not executor:
             self.logger().error(f"Executor ID {executor_id} not found for controller {controller_id}.")
             return
-        executor.early_stop(action.keep_position)
+        executor.early_stop(
+            keep_position=bool(action.keep_position),
+            skip_order_cancel=action.skip_order_cancel,
+        )
 
     def _update_positions_from_done_executors(self):
         """

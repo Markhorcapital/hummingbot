@@ -667,9 +667,14 @@ class ConvergenceExecutor(ExecutorBase):
         self._apply_exit_close_type()
         self._status = RunnableStatus.SHUTTING_DOWN
 
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         """C-1: orchestrator / StopExecutorAction must not hit NotImplementedError."""
-        if self._order and self._order.order and self._order.order.is_open:
+        if (
+            not skip_order_cancel
+            and self._order
+            and self._order.order
+            and self._order.order.is_open
+        ):
             self._strategy.cancel(
                 self.config.connector_name,
                 self.config.trading_pair,

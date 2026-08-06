@@ -36,6 +36,8 @@ MY_TRADES_PATH_URL = "/openApi/spot/v1/trade/query"
 ORDER_PATH_URL = "/openApi/spot/v1/trade/order"
 CANCEL_ORDER_PATH_URL = "/openApi/spot/v1/trade/cancel"
 CANCEL_OPEN_ORDERS_PATH_URL = "/openApi/spot/v1/trade/cancelOpenOrders"
+# Wait after cancelOpenOrders so BingX frees locked balances before REST refresh + requote.
+POST_CANCEL_BALANCE_DELAY_SECONDS = 5.0
 
 WS_HEARTBEAT_TIME_INTERVAL = 30
 
@@ -66,6 +68,13 @@ MAX_REQUEST_GET_MIXED = 400
 MAX_REQUEST_POST = 2400
 MAX_REQUEST_POST_BURST = 50
 MAX_REQUEST_POST_MIXED = 270
+# BingX spot ordinary limits are 5/s place+cancel and 2/s cancelOpenOrders.
+# Use 2/s place headroom — overlapping ladder creates still trip 100410 at 4/s.
+MAX_ORDER_PLACE_REQUESTS_PER_SECOND = 2
+MAX_ORDER_CANCEL_REQUESTS_PER_SECOND = 3
+MAX_CANCEL_OPEN_ORDERS_PER_SECOND = 2
+# Default cooldown when BingX returns 100410 without an unblock timestamp (~5 minutes).
+ORDER_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS = 300.0
 
 # Rate Limit time intervals
 TWO_MINUTES = 120
@@ -97,21 +106,21 @@ RATE_LIMITS = {
     RateLimit(limit_id=SERVER_TIME_PATH_URL, limit=MAX_REQUEST_GET, time_interval=ONE_SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_GET, 1), LinkedLimitWeightPair(REQUEST_GET_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_GET_MIXED, 1)]),
-    RateLimit(limit_id=ORDER_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
+    RateLimit(limit_id=ORDER_PATH_URL, limit=MAX_ORDER_PLACE_REQUESTS_PER_SECOND, time_interval=ONE_SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
-    RateLimit(limit_id=CANCEL_ORDER_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
+    RateLimit(limit_id=CANCEL_ORDER_PATH_URL, limit=MAX_ORDER_CANCEL_REQUESTS_PER_SECOND, time_interval=ONE_SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
-    RateLimit(limit_id=CANCEL_OPEN_ORDERS_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
+    RateLimit(limit_id=CANCEL_OPEN_ORDERS_PATH_URL, limit=MAX_CANCEL_OPEN_ORDERS_PER_SECOND, time_interval=ONE_SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
                              LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
     RateLimit(limit_id=ACCOUNTS_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
-              linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
-                             LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
+              linked_limits=[LinkedLimitWeightPair(REQUEST_GET, 1), LinkedLimitWeightPair(REQUEST_GET_BURST, 1),
+                             LinkedLimitWeightPair(REQUEST_GET_MIXED, 1)]),
     RateLimit(limit_id=MY_TRADES_PATH_URL, limit=MAX_REQUEST_GET, time_interval=TWO_MINUTES,
-              linked_limits=[LinkedLimitWeightPair(REQUEST_POST, 1), LinkedLimitWeightPair(REQUEST_POST_BURST, 1),
-                             LinkedLimitWeightPair(REQUEST_POST_MIXED, 1)]),
+              linked_limits=[LinkedLimitWeightPair(REQUEST_GET, 1), LinkedLimitWeightPair(REQUEST_GET_BURST, 1),
+                             LinkedLimitWeightPair(REQUEST_GET_MIXED, 1)]),
 
 }
 
