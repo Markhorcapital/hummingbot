@@ -559,7 +559,18 @@ class TestBingXExchange(unittest.TestCase):
 
         bulk_url = web_utils.rest_url(CONSTANTS.CANCEL_OPEN_ORDERS_PATH_URL)
         bulk_regex = re.compile(f"^{bulk_url}".replace(".", r"\.").replace("?", r"\?"))
-        mock_api.post(bulk_regex, body=json.dumps({"code": 0, "msg": "", "data": {}}))
+        mock_api.post(bulk_regex, body=json.dumps({"code": 0, "msg": "", "data": {"orders": []}}))
+
+        balances_url = web_utils.rest_url(CONSTANTS.ACCOUNTS_PATH_URL)
+        balances_regex = re.compile(f"^{balances_url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.get(
+            balances_regex,
+            body=json.dumps({
+                "code": 0,
+                "msg": "",
+                "data": {"balances": [{"asset": "AURA", "free": "500", "locked": "0"}]},
+            }),
+        )
 
         results = self.async_run_with_timeout(
             self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
@@ -568,6 +579,113 @@ class TestBingXExchange(unittest.TestCase):
         self.assertEqual(2, len(results))
         self.assertTrue(all(result.success for result in results))
         self.assertTrue(all(order.is_done for order in self.exchange.in_flight_orders.values()))
+        self.assertEqual(Decimal("500"), self.exchange.available_balances["AURA"])
+
+    def test_cancel_all_open_orders_bulk_success_marks_tracked_and_refreshes_balances(self):
+        self.exchange._set_current_timestamp(1640780000)
+        for idx, order_id in enumerate(["OID1", "OID2"], start=1):
+            self.exchange.start_tracking_order(
+                order_id=order_id,
+                exchange_order_id=str(idx),
+                trading_pair=self.trading_pair,
+                trade_type=TradeType.BUY,
+                price=Decimal("0.05"),
+                amount=Decimal("100"),
+                order_type=OrderType.LIMIT,
+            )
+
+        self.exchange._api_post = AsyncMock(return_value={"code": 0, "msg": "", "data": {"orders": []}})
+        self.exchange._update_balances = AsyncMock()
+
+        results = self.async_run_with_timeout(
+            self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
+        )
+
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(result.success for result in results))
+        self.assertTrue(all(order.is_done for order in self.exchange.in_flight_orders.values()))
+        self.exchange._api_post.assert_awaited_once()
+        self.assertEqual(
+            CONSTANTS.CANCEL_OPEN_ORDERS_PATH_URL,
+            self.exchange._api_post.await_args.kwargs["path_url"],
+        )
+        self.assertEqual({"symbol": self.trading_pair}, self.exchange._api_post.await_args.kwargs["params"])
+        self.exchange._update_balances.assert_awaited_once()
+
+    def test_cancel_all_open_orders_falls_back_when_bulk_fails(self):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.SELL,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+
+        self.exchange._api_post = AsyncMock(return_value={"code": 100500, "msg": "System busy", "data": {}})
+        self.exchange._place_cancel = AsyncMock(return_value=True)
+
+        results = self.async_run_with_timeout(
+            self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
+        )
+
+        self.assertEqual(1, len(results))
+        self.assertTrue(results[0].success)
+        self.assertTrue(
+            self._is_logged(
+                "WARNING",
+                f"BingX cancelOpenOrders for {self.trading_pair} returned code=100500 msg=System busy",
+            )
+        )
+        self.exchange._place_cancel.assert_awaited()
+
+    def test_place_cancel_uses_client_order_id_casing(self):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id=None,
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+        self.exchange._api_post = AsyncMock(return_value={
+            "code": 0,
+            "msg": "",
+            "data": {"symbol": self.trading_pair, "orderId": 99, "clientOrderID": "OID1", "status": "CANCELED"},
+        })
+
+        cancelled = self.async_run_with_timeout(self.exchange._place_cancel("OID1", order))
+        self.assertTrue(cancelled)
+        params = self.exchange._api_post.await_args.kwargs["params"]
+        self.assertEqual(params["clientOrderID"], "OID1")
+        self.assertNotIn("clientOrderId", params)
+
+    def test_place_cancel_treats_already_canceled_as_success(self):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="123",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+        self.exchange._api_post = AsyncMock(return_value={
+            "code": 100404,
+            "msg": "Order does not exist",
+            "data": {},
+        })
+
+        cancelled = self.async_run_with_timeout(self.exchange._place_cancel("OID1", order))
+        self.assertTrue(cancelled)
+        self.assertTrue(order.is_done)
 
     @aioresponses()
     def test_update_balances(self, mock_api):

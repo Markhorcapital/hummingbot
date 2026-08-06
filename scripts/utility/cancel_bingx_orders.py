@@ -110,7 +110,7 @@ def cancel_one(
     if order_id:
         params["orderId"] = order_id
     elif client_order_id:
-        params["clientOrderId"] = client_order_id
+        params["clientOrderID"] = client_order_id
     else:
         raise ValueError("Need --order-id or --client-order-id")
     return bingx_request("POST", CANCEL_ORDER_PATH, api_key, api_secret, params)

@@ -126,11 +126,13 @@ class BingXExchange(ExchangePyBase):
         return False
 
     def _is_order_not_found_during_cancelation_error(self, cancelation_exception: Exception) -> bool:
-        # TODO: implement this method correctly for the connector
-        # The default implementation was added when the functionality to detect not found orders was introduced in the
-        # ExchangePyBase class. Also fix the unit test test_cancel_order_not_found_in_the_exchange when replacing the
-        # dummy implementation
-        return False
+        error_description = str(cancelation_exception)
+        return (
+            "100400" in error_description
+            or "100404" in error_description
+            or "order not found" in error_description.lower()
+            or "order does not exist" in error_description.lower()
+        )
 
     def _create_web_assistants_factory(self) -> WebAssistantsFactory:
         return web_utils.build_api_factory(
@@ -269,7 +271,8 @@ class BingXExchange(ExchangePyBase):
         if tracked_order.exchange_order_id:
             api_params["orderId"] = tracked_order.exchange_order_id
         else:
-            api_params["clientOrderId"] = tracked_order.client_order_id
+            # BingX cancel API expects clientOrderID (capital ID), not clientOrderId.
+            api_params["clientOrderID"] = tracked_order.client_order_id
 
         cancel_result = await self._api_post(
             path_url=CONSTANTS.CANCEL_ORDER_PATH_URL,
@@ -287,24 +290,47 @@ class BingXExchange(ExchangePyBase):
             ))
 
             return True
-        else:
-            await self._order_tracker.process_order_not_found(tracked_order.client_order_id)
 
-            return False
+        # Order already gone on exchange (e.g. after cancelOpenOrders) — treat as canceled locally.
+        code = cancel_result.get("code") if isinstance(cancel_result, dict) else None
+        msg = str(cancel_result.get("msg", "") if isinstance(cancel_result, dict) else cancel_result).lower()
+        if code in (100400, 100404) or "not found" in msg or "does not exist" in msg:
+            self._order_tracker.process_order_update(OrderUpdate(
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=tracked_order.exchange_order_id,
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=time.time(),
+                new_state=OrderState.CANCELED
+            ))
+            return True
+
+        await self._order_tracker.process_order_not_found(tracked_order.client_order_id)
+        return False
 
     async def cancel_all_open_orders_for_trading_pair(
         self, trading_pair: str, timeout_seconds: float = 10.0
     ) -> List[CancellationResult]:
         """
         Cancel all open spot orders for a symbol via BingX bulk cancel, then reconcile tracked orders.
+
+        On successful cancelOpenOrders, mark tracked orders canceled locally and refresh balances
+        so the strategy sees freed funds before recreating quotes. Fall back to per-order cancel
+        only when the bulk call fails.
         """
+        incomplete_orders = [
+            o for o in self.in_flight_orders.values()
+            if not o.is_done and o.trading_pair == trading_pair
+        ]
+        bulk_ok = False
         try:
             cancel_result = await self._api_post(
                 path_url=CONSTANTS.CANCEL_OPEN_ORDERS_PATH_URL,
                 params={"symbol": trading_pair},
                 is_auth_required=True,
             )
-            if isinstance(cancel_result, dict) and cancel_result.get("code") != 0:
+            if isinstance(cancel_result, dict) and cancel_result.get("code") == 0:
+                bulk_ok = True
+            elif isinstance(cancel_result, dict):
                 self.logger().warning(
                     "BingX cancelOpenOrders for %s returned code=%s msg=%s",
                     trading_pair,
@@ -317,6 +343,29 @@ class BingXExchange(ExchangePyBase):
                 trading_pair,
                 e,
             )
+
+        if bulk_ok:
+            now = time.time()
+            results: List[CancellationResult] = []
+            for order in incomplete_orders:
+                self._order_tracker.process_order_update(OrderUpdate(
+                    client_order_id=order.client_order_id,
+                    exchange_order_id=order.exchange_order_id,
+                    trading_pair=order.trading_pair,
+                    update_timestamp=now,
+                    new_state=OrderState.CANCELED,
+                ))
+                results.append(CancellationResult(order.client_order_id, True))
+            try:
+                await self._update_balances()
+            except Exception as e:
+                self.logger().warning(
+                    "Failed to refresh balances after BingX cancelOpenOrders for %s: %s",
+                    trading_pair,
+                    e,
+                )
+            return results
+
         return await super().cancel_all_open_orders_for_trading_pair(
             trading_pair=trading_pair,
             timeout_seconds=timeout_seconds,
