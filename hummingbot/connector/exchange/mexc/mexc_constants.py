@@ -26,6 +26,7 @@ SERVER_TIME_PATH_URL = "/time"
 ACCOUNTS_PATH_URL = "/account"
 MY_TRADES_PATH_URL = "/myTrades"
 ORDER_PATH_URL = "/order"
+OPEN_ORDERS_PATH_URL = "/openOrders"
 MEXC_USER_STREAM_PATH_URL = "/userDataStream"
 
 WS_HEARTBEAT_TIME_INTERVAL = 30
@@ -105,7 +106,9 @@ RATE_LIMITS = [
     RateLimit(limit_id=MY_TRADES_PATH_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
               linked_limits=[LinkedLimitWeightPair(UID_REQUEST_WEIGHT, 10)]),
     RateLimit(limit_id=ORDER_PATH_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
-              linked_limits=[LinkedLimitWeightPair(UID_REQUEST_WEIGHT, 2)])
+              linked_limits=[LinkedLimitWeightPair(UID_REQUEST_WEIGHT, 2)]),
+    RateLimit(limit_id=OPEN_ORDERS_PATH_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
+              linked_limits=[LinkedLimitWeightPair(UID_REQUEST_WEIGHT, 2)]),
 ]
 
 ORDER_NOT_EXIST_ERROR_CODE = -2013

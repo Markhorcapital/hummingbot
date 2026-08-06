@@ -3,7 +3,7 @@ import json
 import re
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aioresponses import aioresponses
 from aioresponses.core import RequestCall
@@ -1158,6 +1158,78 @@ class MexcExchangeTests(AbstractExchangeConnectorTests.ExchangeConnectorTests):
         result = self.async_run_with_timeout(self.exchange._format_trading_rules(exchange_info))
 
         self.assertEqual(result[0].min_notional_size, Decimal("0.00100000"))
+
+    def test_cancel_all_open_orders_bulk_success_marks_tracked_orders_canceled(self):
+        self.exchange._set_current_timestamp(1640780000)
+        for idx, order_id in enumerate(["OID1", "OID2"], start=1):
+            self.exchange.start_tracking_order(
+                order_id=order_id,
+                exchange_order_id=str(idx),
+                trading_pair=self.trading_pair,
+                trade_type=TradeType.BUY,
+                price=Decimal("1000"),
+                amount=Decimal("1"),
+                order_type=OrderType.LIMIT,
+            )
+
+        self.exchange._api_delete = AsyncMock(return_value=[
+            {"symbol": "COINALPHAHBOT", "orderId": 1, "status": "CANCELED"},
+            {"symbol": "COINALPHAHBOT", "orderId": 2, "status": "CANCELED"},
+        ])
+
+        async def _set_balances():
+            self.exchange._account_available_balances[self.base_asset] = Decimal("500")
+            self.exchange._account_balances[self.base_asset] = Decimal("500")
+
+        self.exchange._update_balances = AsyncMock(side_effect=_set_balances)
+
+        results = self.async_run_with_timeout(
+            self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
+        )
+
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(result.success for result in results))
+        self.assertTrue(all(order.is_done for order in self.exchange.in_flight_orders.values()))
+        self.assertEqual(Decimal("500"), self.exchange.available_balances[self.base_asset])
+        self.exchange._api_delete.assert_awaited_once()
+        self.assertEqual(
+            CONSTANTS.OPEN_ORDERS_PATH_URL,
+            self.exchange._api_delete.await_args.kwargs["path_url"],
+        )
+        self.assertEqual(
+            {"symbol": self.exchange_symbol_for_tokens(self.base_asset, self.quote_asset)},
+            self.exchange._api_delete.await_args.kwargs["params"],
+        )
+        self.exchange._update_balances.assert_awaited_once()
+
+    def test_cancel_all_open_orders_falls_back_when_bulk_fails(self):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.SELL,
+            price=Decimal("1000"),
+            amount=Decimal("1"),
+            order_type=OrderType.LIMIT,
+        )
+
+        self.exchange._api_delete = AsyncMock(return_value={"code": -2011, "msg": "Unknown order sent."})
+        self.exchange._place_cancel = AsyncMock(return_value=True)
+
+        results = self.async_run_with_timeout(
+            self.exchange.cancel_all_open_orders_for_trading_pair(self.trading_pair)
+        )
+
+        self.assertEqual(1, len(results))
+        self.assertTrue(results[0].success)
+        self.assertTrue(
+            self.is_logged(
+                "WARNING",
+                f"MEXC cancel openOrders for {self.trading_pair} returned code=-2011 msg=Unknown order sent.",
+            )
+        )
+        self.exchange._place_cancel.assert_awaited()
 
     def _validate_auth_credentials_taking_parameters_from_argument(self,
                                                                    request_call_tuple: RequestCall,
