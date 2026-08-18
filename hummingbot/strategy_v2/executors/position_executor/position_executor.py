@@ -66,6 +66,7 @@ class PositionExecutor(ExecutorBase):
         self._total_executed_amount_backup: Decimal = Decimal("0")
         self._current_retries = 0
         self._max_retries = max_retries
+        self._skip_order_cancel: bool = False
 
     @property
     def is_perpetual(self) -> bool:
@@ -322,6 +323,17 @@ class PositionExecutor(ExecutorBase):
         :return: None
         """
         self.close_timestamp = self._strategy.current_timestamp
+        if self._skip_order_cancel:
+            # Refresh bulk-cancel already cleared exchange orders for unfilled makers.
+            # Do not issue per-order cancels (avoids BingX rate-limit bans).
+            self._open_order = None
+            self._take_profit_limit_order = None
+            if self.close_type == CloseType.POSITION_HOLD and len(self._held_position_orders) == 0:
+                self.close_type = CloseType.EARLY_STOP
+            self.stop()
+            await self._sleep(5.0)
+            return
+
         if self.all_orders_completed():
             if self.close_type == CloseType.POSITION_HOLD:
                 if self._open_order and self._open_order.is_filled:
@@ -623,12 +635,15 @@ class PositionExecutor(ExecutorBase):
         )
         self.logger().debug("Removing open order")
 
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         """
         This method allows strategy to stop the executor early.
 
+        :param keep_position: If True, hold inventory instead of forcing a market close.
+        :param skip_order_cancel: If True, shut down without canceling (bulk cancel already done).
         :return: None
         """
+        self._skip_order_cancel = skip_order_cancel
         self.close_type = CloseType.POSITION_HOLD if keep_position else CloseType.EARLY_STOP
         self._status = RunnableStatus.SHUTTING_DOWN
 
@@ -695,8 +710,11 @@ class PositionExecutor(ExecutorBase):
         error_message = (event.error_message or "").lower()
         if not error_message:
             return False
-        if "100202" in error_message or "100410" in error_message or "30004" in error_message:
+        if "100202" in error_message or "30004" in error_message:
             return True
+        # BingX 100410 (rate limit / disabled period) is transient — retry after cooldown.
+        if "100410" in error_message or "disabled period" in error_message:
+            return False
         if (
             "insufficient" in error_message
             or "insufficient assets" in error_message

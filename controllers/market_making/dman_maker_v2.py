@@ -88,7 +88,9 @@ class DManMakerV2(MarketMakingControllerBase):
             filter_func=lambda x: not x.is_trading and x.is_active and (self.order_level_refresh_condition(x) or self.first_level_refresh_condition(x)))
         return [StopExecutorAction(
             controller_id=self.config.id,
-            executor_id=executor.id) for executor in executors_to_refresh]
+            executor_id=executor.id,
+            skip_order_cancel=self._skip_cancel_on_refresh_stop,
+        ) for executor in executors_to_refresh]
 
     def get_executor_config(self, level_id: str, price: Decimal, amount: Decimal):
         trade_type = self.get_trade_type_from_level_id(level_id)

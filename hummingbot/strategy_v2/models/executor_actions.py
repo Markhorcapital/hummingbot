@@ -27,6 +27,9 @@ class StopExecutorAction(ExecutorAction):
     """
     executor_id: str
     keep_position: Optional[bool] = False
+    # When True, executor should shut down without issuing per-order cancels
+    # (e.g. exchange orders already cleared by bulk cancel on refresh).
+    skip_order_cancel: bool = False
 
 
 class StoreExecutorAction(ExecutorAction):

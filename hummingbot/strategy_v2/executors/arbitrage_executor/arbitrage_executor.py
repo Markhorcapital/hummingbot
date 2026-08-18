@@ -668,7 +668,7 @@ class ArbitrageExecutor(ExecutorBase):
             self.order_amount = original
 
     # ------------------------------------------------------------- execution
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         self.close_type = CloseType.EARLY_STOP
         self.stop()
 

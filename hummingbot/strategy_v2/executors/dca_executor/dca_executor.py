@@ -362,13 +362,19 @@ class DCAExecutor(ExecutorBase):
                 self.close_type = CloseType.TAKE_PROFIT
                 self.place_close_order_and_cancel_open_orders()
 
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         """
         This method allows strategy to stop the executor early.
         """
         if keep_position:
             self.close_type = CloseType.POSITION_HOLD
-            self.cancel_open_orders()
+            if not skip_order_cancel:
+                self.cancel_open_orders()
+            self.stop()
+        elif skip_order_cancel:
+            self.close_type = CloseType.EARLY_STOP
+            self._status = RunnableStatus.SHUTTING_DOWN
+            self.close_timestamp = self._strategy.current_timestamp
             self.stop()
         else:
             self.close_type = CloseType.EARLY_STOP

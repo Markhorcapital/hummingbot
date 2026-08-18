@@ -1,4 +1,5 @@
 import asyncio
+import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -12,8 +13,9 @@ from hummingbot.connector.exchange.mexc.mexc_auth import MexcAuth
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import TradeFillOrderDetails, combine_to_hb_trading_pair
+from hummingbot.core.data_type.cancellation_result import CancellationResult
 from hummingbot.core.data_type.common import OrderType, TradeType
-from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderUpdate, TradeUpdate
+from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.data_type.trade_fee import DeductedFromReturnsTradeFee, TokenAmount, TradeFeeBase
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
@@ -218,6 +220,72 @@ class MexcExchange(ExchangePyBase):
         if cancel_result.get("status") == "NEW":
             return True
         return False
+
+    async def cancel_all_open_orders_for_trading_pair(
+        self, trading_pair: str, timeout_seconds: float = 10.0
+    ) -> List[CancellationResult]:
+        """
+        Cancel all open spot orders for a symbol via MEXC DELETE /api/v3/openOrders.
+
+        On success, mark tracked orders canceled locally and refresh balances so the
+        strategy sees freed funds before recreating quotes. Fall back to per-order
+        cancel only when the bulk call fails.
+        """
+        incomplete_orders = [
+            o for o in self.in_flight_orders.values()
+            if not o.is_done and o.trading_pair == trading_pair
+        ]
+        bulk_ok = False
+        try:
+            symbol = await self.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
+            cancel_result = await self._api_delete(
+                path_url=CONSTANTS.OPEN_ORDERS_PATH_URL,
+                params={"symbol": symbol},
+                is_auth_required=True,
+            )
+            # Success responses are a list of canceled orders (may be empty).
+            if isinstance(cancel_result, list):
+                bulk_ok = True
+            elif isinstance(cancel_result, dict):
+                self.logger().warning(
+                    "MEXC cancel openOrders for %s returned code=%s msg=%s",
+                    trading_pair,
+                    cancel_result.get("code"),
+                    cancel_result.get("msg"),
+                )
+        except Exception as e:
+            self.logger().warning(
+                "MEXC cancel openOrders failed for %s: %s. Falling back to tracked order cancels.",
+                trading_pair,
+                e,
+            )
+
+        if bulk_ok:
+            now = time.time()
+            results: List[CancellationResult] = []
+            for order in incomplete_orders:
+                await self._order_tracker._process_order_update(OrderUpdate(
+                    client_order_id=order.client_order_id,
+                    exchange_order_id=order.exchange_order_id,
+                    trading_pair=order.trading_pair,
+                    update_timestamp=now,
+                    new_state=OrderState.CANCELED,
+                ))
+                results.append(CancellationResult(order.client_order_id, True))
+            try:
+                await self._update_balances()
+            except Exception as e:
+                self.logger().warning(
+                    "Failed to refresh balances after MEXC cancel openOrders for %s: %s",
+                    trading_pair,
+                    e,
+                )
+            return results
+
+        return await super().cancel_all_open_orders_for_trading_pair(
+            trading_pair=trading_pair,
+            timeout_seconds=timeout_seconds,
+        )
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         trading_pair_rules = exchange_info_dict.get("symbols", [])

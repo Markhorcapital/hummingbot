@@ -101,7 +101,7 @@ class OrderExecutor(ExecutorBase):
             if self._order.order.price - current_price > (current_price * threshold):
                 self.renew_order()
 
-    def early_stop(self, keep_position: bool = True):
+    def early_stop(self, keep_position: bool = True, skip_order_cancel: bool = False):
         """
         This method allows strategy to stop the executor early.
 

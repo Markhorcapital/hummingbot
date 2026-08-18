@@ -271,13 +271,14 @@ class GridExecutor(ExecutorBase):
             await self.control_shutdown_process()
         self.evaluate_max_retries()
 
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         """
         This method allows strategy to stop the executor early.
 
         :return: None
         """
-        self.cancel_open_orders()
+        if not skip_order_cancel:
+            self.cancel_open_orders()
         self._status = RunnableStatus.SHUTTING_DOWN
         self.close_type = CloseType.POSITION_HOLD if keep_position else CloseType.EARLY_STOP
 

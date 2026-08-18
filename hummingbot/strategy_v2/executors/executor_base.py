@@ -182,9 +182,13 @@ class ExecutorBase(RunnableBase):
         """
         pass
 
-    def early_stop(self, keep_position: bool = False):
+    def early_stop(self, keep_position: bool = False, skip_order_cancel: bool = False):
         """
         This method allows strategy to stop the executor early.
+
+        :param keep_position: If True, hold inventory instead of forcing a market close.
+        :param skip_order_cancel: If True, shut down without canceling open orders
+            (orders already canceled elsewhere, e.g. bulk refresh cleanup).
         """
         raise NotImplementedError
 

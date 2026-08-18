@@ -250,6 +250,7 @@ class MarketMakingControllerBase(ControllerBase):
         self.config = config
         self._bulk_cancel_armed_for_refresh: bool = False
         self._refresh_pending_executor_ids: Set[str] = set()
+        self._skip_cancel_on_refresh_stop: bool = False
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_name, trading_pair=config.trading_pair)])
 
@@ -271,10 +272,12 @@ class MarketMakingControllerBase(ControllerBase):
             return
         if not self.executors_to_refresh():
             self._bulk_cancel_armed_for_refresh = False
+            self._skip_cancel_on_refresh_stop = False
             return
         if self._bulk_cancel_armed_for_refresh:
             return
         self._bulk_cancel_armed_for_refresh = True
+        self._skip_cancel_on_refresh_stop = False
         try:
             connector = self.market_data_provider.get_connector(self.config.connector_name)
             results = await connector.cancel_all_open_orders_for_trading_pair(
@@ -283,6 +286,8 @@ class MarketMakingControllerBase(ControllerBase):
             )
             cancelled = sum(1 for r in results if r.success)
             failed = len(results) - cancelled
+            # Empty results (no open orders) or all succeeded → skip per-executor cancels.
+            self._skip_cancel_on_refresh_stop = failed == 0
             if results:
                 self.logger().info(
                     "Refresh cleanup: cancelled %s open order(s) on %s %s (%s failed).",
@@ -292,6 +297,7 @@ class MarketMakingControllerBase(ControllerBase):
                     failed,
                 )
         except Exception as e:
+            self._skip_cancel_on_refresh_stop = False
             self.logger().warning(
                 "Refresh cleanup: could not bulk-cancel open orders on %s %s: %s",
                 self.config.connector_name,
@@ -310,6 +316,7 @@ class MarketMakingControllerBase(ControllerBase):
         if not self._refresh_pending_executor_ids & active_ids:
             self._refresh_pending_executor_ids.clear()
             self._bulk_cancel_armed_for_refresh = False
+            self._skip_cancel_on_refresh_stop = False
             return False
         return True
 
@@ -326,6 +333,7 @@ class MarketMakingControllerBase(ControllerBase):
             return actions
         if not self.executors_to_refresh():
             self._bulk_cancel_armed_for_refresh = False
+            self._skip_cancel_on_refresh_stop = False
         actions.extend(self.create_actions_proposal())
         return actions
 
@@ -390,7 +398,9 @@ class MarketMakingControllerBase(ControllerBase):
 
         return [StopExecutorAction(
             controller_id=self.config.id,
-            executor_id=executor.id) for executor in executors_to_refresh]
+            executor_id=executor.id,
+            skip_order_cancel=self._skip_cancel_on_refresh_stop,
+        ) for executor in executors_to_refresh]
 
     def executors_to_early_stop(self) -> List[ExecutorAction]:
         """

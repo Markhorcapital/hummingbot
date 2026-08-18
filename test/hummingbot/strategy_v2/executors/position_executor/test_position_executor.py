@@ -744,12 +744,23 @@ class TestPositionExecutor(IsolatedAsyncioWrapperTestCase):
         )
         self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
 
-    def test_is_non_retryable_failure_bingx_100410(self):
+    def test_is_non_retryable_failure_bingx_100410_is_retryable(self):
         event = MarketOrderFailureEvent(
             timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
-            error_message="BingX rate limited (100410), waited 60s"
+            error_message="BingX place order failed: code=100410 msg=rate limited"
         )
-        self.assertTrue(PositionExecutor._is_non_retryable_failure(event))
+        self.assertFalse(PositionExecutor._is_non_retryable_failure(event))
+
+    def test_is_non_retryable_failure_bingx_disabled_period_is_retryable(self):
+        event = MarketOrderFailureEvent(
+            timestamp=1.0, order_id="OID-1", order_type=OrderType.LIMIT,
+            error_message=(
+                "BingX place order for ALI-USDT failed: code=100410 "
+                "msg=code:100410:The endpoint trigger frequency limit rule is currently "
+                "in the disabled period and will be unblocked after 1786014979004"
+            ),
+        )
+        self.assertFalse(PositionExecutor._is_non_retryable_failure(event))
 
     def test_is_non_retryable_failure_gate_30004(self):
         event = MarketOrderFailureEvent(
