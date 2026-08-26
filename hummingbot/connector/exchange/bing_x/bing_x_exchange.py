@@ -568,6 +568,45 @@ class BingXExchange(ExchangePyBase):
                 self.logger().error("Unexpected error in user stream listener loop.", exc_info=True)
                 await self._sleep(5.0)
 
+    @staticmethod
+    def _unwrap_query_data(response: Any) -> Optional[Dict[str, Any]]:
+        """
+        Normalize BingX /trade/query payloads.
+
+        The API may return data as a dict, a list of dicts, or empty/missing when the
+        order is already gone (e.g. after bulk cancel). Incorrect assumptions here caused
+        KeyError('data') and "list indices must be integers or slices, not str".
+        """
+        if not isinstance(response, dict):
+            return None
+        data = response.get("data")
+        if data is None:
+            return None
+        if isinstance(data, list):
+            if not data:
+                return None
+            first = data[0]
+            return first if isinstance(first, dict) else None
+        if isinstance(data, dict):
+            return data
+        return None
+
+    @staticmethod
+    def _fill_records_from_query_data(data: Any) -> List[Dict[str, Any]]:
+        """Extract fill-like records from /trade/query data (dict or list)."""
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return [
+                item for item in data
+                if isinstance(item, dict) and ("executedQty" in item or "feeAsset" in item)
+            ]
+        if isinstance(data, dict):
+            if "executedQty" in data or "feeAsset" in data:
+                return [data]
+            return []
+        return []
+
     async def _all_trade_updates_for_order(self, order: InFlightOrder) -> List[TradeUpdate]:
         trade_updates = []
 
@@ -582,26 +621,32 @@ class BingXExchange(ExchangePyBase):
                 },
                 is_auth_required=True,
                 limit_id=CONSTANTS.MY_TRADES_PATH_URL)
-            trade = all_fills_response.get("data", [])
-            if trade is not None:
-                # for trade in fills_data:
-                exchange_order_id = str(trade["orderId"])
+            fills = self._fill_records_from_query_data(
+                all_fills_response.get("data") if isinstance(all_fills_response, dict) else None
+            )
+            for trade in fills:
+                fill_exchange_order_id = str(trade.get("orderId", exchange_order_id))
+                fee_asset = trade.get("feeAsset") or trading_pair.split("-")[-1]
+                fee_amount = Decimal(str(trade.get("fee", "0")))
                 fee = TradeFeeBase.new_spot_fee(
                     fee_schema=self.trade_fee_schema(),
                     trade_type=order.trade_type,
-                    percent_token=trade["feeAsset"],
-                    flat_fees=[TokenAmount(amount=Decimal(str(trade["fee"])), token=trade["feeAsset"])]
+                    percent_token=fee_asset,
+                    flat_fees=[TokenAmount(amount=fee_amount, token=fee_asset)]
                 )
+                executed_qty = Decimal(str(trade.get("executedQty", "0")))
+                price = Decimal(str(trade.get("price", "0")))
+                update_time = trade.get("updateTime") or trade.get("time") or 0
                 trade_update = TradeUpdate(
-                    trade_id=str(trade["orderId"]),
+                    trade_id=str(trade.get("orderId", fill_exchange_order_id)),
                     client_order_id=order.client_order_id,
-                    exchange_order_id=exchange_order_id,
+                    exchange_order_id=fill_exchange_order_id,
                     trading_pair=trading_pair,
                     fee=fee,
-                    fill_base_amount=Decimal(str(trade["executedQty"])),
-                    fill_quote_amount=Decimal(str(trade["price"])) * Decimal(str(trade["executedQty"])),
-                    fill_price=Decimal(str(trade["price"])),
-                    fill_timestamp=int(trade["updateTime"]) * 1e-3,
+                    fill_base_amount=executed_qty,
+                    fill_quote_amount=price * executed_qty,
+                    fill_price=price,
+                    fill_timestamp=int(update_time) * 1e-3,
                 )
                 trade_updates.append(trade_update)
 
@@ -616,17 +661,36 @@ class BingXExchange(ExchangePyBase):
             },
             is_auth_required=True)
 
-        new_state = CONSTANTS.ORDER_STATE[updated_order_data["data"]["status"]]
+        order_data = self._unwrap_query_data(updated_order_data)
+        # Order missing after cancel / unknown response shape → treat as canceled so
+        # executors and levels are not left as zombies.
+        if order_data is None or "status" not in order_data:
+            return OrderUpdate(
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=tracked_order.exchange_order_id,
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=OrderState.CANCELED,
+            )
+
+        status_key = order_data["status"]
+        new_state = CONSTANTS.ORDER_STATE.get(status_key, OrderState.FAILED)
         if new_state == OrderState.PENDING_CREATE:
             # This event has already been dispatched after calling _place_order.
             new_state = OrderState.OPEN
 
+        exchange_order_id = str(order_data.get("orderId", tracked_order.exchange_order_id))
+        update_time = order_data.get("updateTime") or order_data.get("time")
+        update_timestamp = (
+            int(update_time) * 1e-3 if update_time is not None else self.current_timestamp
+        )
+
         if new_state == OrderState.FILLED and tracked_order.current_state == OrderState.PENDING_CREATE:
             order_update = OrderUpdate(
                 client_order_id=tracked_order.client_order_id,
-                exchange_order_id=str(updated_order_data["data"]["orderId"]),
+                exchange_order_id=exchange_order_id,
                 trading_pair=tracked_order.trading_pair,
-                update_timestamp=int(updated_order_data["data"]["updateTime"]) * 1e-3,
+                update_timestamp=update_timestamp,
                 new_state=OrderState.OPEN,
             )
             # noinspection PyProtectedMember
@@ -634,9 +698,9 @@ class BingXExchange(ExchangePyBase):
 
         order_update = OrderUpdate(
             client_order_id=tracked_order.client_order_id,
-            exchange_order_id=str(updated_order_data["data"]["orderId"]),
+            exchange_order_id=exchange_order_id,
             trading_pair=tracked_order.trading_pair,
-            update_timestamp=int(updated_order_data["data"]["updateTime"]) * 1e-3,
+            update_timestamp=update_timestamp,
             new_state=new_state,
         )
 
