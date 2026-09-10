@@ -66,6 +66,22 @@ class MarketMakingControllerConfigBase(ControllerConfigBase):
             "prompt": "Enter the cooldown time in seconds between replacing an executor that traded (e.g., 15): ",
             "prompt_on_new": True, "is_updatable": True}
     )
+    failed_executor_cooldown_time: int = Field(
+        default=30,
+        json_schema_extra={
+            "prompt": "Cooldown seconds before recreating a level that failed (FAILED/INSUFFICIENT_BALANCE): ",
+            "prompt_on_new": False,
+            "is_updatable": True,
+        },
+    )
+    refresh_stale_timeout: int = Field(
+        default=60,
+        json_schema_extra={
+            "prompt": "Seconds to wait for refresh targets to go inactive before allowing creates again: ",
+            "prompt_on_new": False,
+            "is_updatable": True,
+        },
+    )
     leverage: int = Field(
         default=20,
         json_schema_extra={
@@ -251,8 +267,15 @@ class MarketMakingControllerBase(ControllerBase):
         self._bulk_cancel_armed_for_refresh: bool = False
         self._refresh_pending_executor_ids: Set[str] = set()
         self._skip_cancel_on_refresh_stop: bool = False
+        self._refresh_cycle_started_at: Optional[float] = None
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_name, trading_pair=config.trading_pair)])
+
+    def _clear_refresh_cycle_state(self) -> None:
+        self._refresh_pending_executor_ids.clear()
+        self._bulk_cancel_armed_for_refresh = False
+        self._skip_cancel_on_refresh_stop = False
+        self._refresh_cycle_started_at = None
 
     async def control_task(self):
         if self.market_data_provider.ready and self.executors_update_event.is_set():
@@ -271,13 +294,14 @@ class MarketMakingControllerBase(ControllerBase):
         if not self.config.cancel_open_orders_on_refresh:
             return
         if not self.executors_to_refresh():
-            self._bulk_cancel_armed_for_refresh = False
-            self._skip_cancel_on_refresh_stop = False
+            self._clear_refresh_cycle_state()
             return
         if self._bulk_cancel_armed_for_refresh:
             return
         self._bulk_cancel_armed_for_refresh = True
         self._skip_cancel_on_refresh_stop = False
+        if self._refresh_cycle_started_at is None:
+            self._refresh_cycle_started_at = self.market_data_provider.time()
         try:
             connector = self.market_data_provider.get_connector(self.config.connector_name)
             results = await connector.cancel_all_open_orders_for_trading_pair(
@@ -306,17 +330,33 @@ class MarketMakingControllerBase(ControllerBase):
             )
 
     def _register_refresh_targets(self) -> None:
+        new_targets = False
         for action in self.executors_to_refresh():
+            if action.executor_id not in self._refresh_pending_executor_ids:
+                new_targets = True
             self._refresh_pending_executor_ids.add(action.executor_id)
+        if new_targets and self._refresh_cycle_started_at is None:
+            self._refresh_cycle_started_at = self.market_data_provider.time()
 
     def _has_active_refresh_executors(self) -> bool:
         if not self._refresh_pending_executor_ids:
             return False
         active_ids = {executor.id for executor in self.executors_info if executor.is_active}
         if not self._refresh_pending_executor_ids & active_ids:
-            self._refresh_pending_executor_ids.clear()
-            self._bulk_cancel_armed_for_refresh = False
-            self._skip_cancel_on_refresh_stop = False
+            self._clear_refresh_cycle_state()
+            return False
+        # Safety valve: zombie / stuck refresh targets must not block creates forever.
+        now = self.market_data_provider.time()
+        started = self._refresh_cycle_started_at
+        timeout = self.config.refresh_stale_timeout
+        if started is not None and timeout > 0 and now - started >= timeout:
+            stale_ids = sorted(self._refresh_pending_executor_ids & active_ids)
+            self.logger().warning(
+                "Refresh targets still active after %ss (%s). Clearing refresh deferral to allow creates.",
+                timeout,
+                stale_ids,
+            )
+            self._clear_refresh_cycle_state()
             return False
         return True
 
@@ -332,8 +372,7 @@ class MarketMakingControllerBase(ControllerBase):
         if self._has_active_refresh_executors():
             return actions
         if not self.executors_to_refresh():
-            self._bulk_cancel_armed_for_refresh = False
-            self._skip_cancel_on_refresh_stop = False
+            self._clear_refresh_cycle_state()
         actions.extend(self.create_actions_proposal())
         return actions
 
@@ -348,7 +387,7 @@ class MarketMakingControllerBase(ControllerBase):
         if position_rebalance_action:
             create_actions.append(position_rebalance_action)
 
-        # Create normal market making levels
+        # Create normal market making levels (inner/smaller levels first)
         levels_to_execute = self.get_levels_to_execute()
         for level_id in levels_to_execute:
             price, amount = self.get_price_and_amount(level_id)
@@ -363,6 +402,7 @@ class MarketMakingControllerBase(ControllerBase):
     def get_levels_to_execute(self) -> List[str]:
         now = self.market_data_provider.time()
         non_retryable_close_types = {CloseType.FAILED, CloseType.INSUFFICIENT_BALANCE}
+        failed_cooldown = self.config.failed_executor_cooldown_time
         working_levels = self.filter_executors(
             executors=self.executors_info,
             filter_func=lambda x: (
@@ -375,7 +415,7 @@ class MarketMakingControllerBase(ControllerBase):
                 or (
                     x.close_type in non_retryable_close_types
                     and x.close_timestamp is not None
-                    and now - x.close_timestamp < self.config.executor_refresh_time
+                    and now - x.close_timestamp < failed_cooldown
                 )
             )
         )
@@ -453,12 +493,21 @@ class MarketMakingControllerBase(ControllerBase):
     def get_not_active_levels_ids(self, active_levels_ids: List[str]) -> List[str]:
         """
         Get the levels to execute based on the current state of the controller.
+
+        Inner levels (lower index) are returned first so large outer levels place after
+        smaller ones have claimed less balance (reduces balance-not-enough races).
         """
         buy_ids_missing = [self.get_level_id_from_side(TradeType.BUY, level) for level in range(len(self.config.buy_spreads))
                            if self.get_level_id_from_side(TradeType.BUY, level) not in active_levels_ids]
         sell_ids_missing = [self.get_level_id_from_side(TradeType.SELL, level) for level in range(len(self.config.sell_spreads))
                             if self.get_level_id_from_side(TradeType.SELL, level) not in active_levels_ids]
-        return buy_ids_missing + sell_ids_missing
+        return sorted(
+            buy_ids_missing + sell_ids_missing,
+            key=lambda level_id: (
+                self.get_level_from_level_id(level_id),
+                0 if level_id.startswith("buy") else 1,
+            ),
+        )
 
     def check_position_rebalance(self) -> Optional[CreateExecutorAction]:
         """

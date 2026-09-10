@@ -544,7 +544,92 @@ class TestBingXExchange(unittest.TestCase):
         self.assertEqual(request_params["symbol"], self.trading_pair)
         self.assertEqual(request_params["orderId"], "1735965009395131234")
 
-    @patch("hummingbot.connector.exchange.bing_x.bing_x_exchange.asyncio.sleep", new_callable=AsyncMock)
+    @aioresponses()
+    def test_request_order_status_list_data_payload(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1735965009395131234",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+
+        url = web_utils.rest_url(CONSTANTS.MY_TRADES_PATH_URL)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.get(regex_url, body=json.dumps({
+            "code": 0,
+            "msg": "",
+            "data": [{
+                "symbol": self.trading_pair,
+                "orderId": 1735965009395131234,
+                "status": "NEW",
+                "updateTime": 1698910178296,
+            }],
+        }))
+
+        update = self.async_run_with_timeout(self.exchange._request_order_status(order))
+        self.assertEqual(update.new_state, OrderState.OPEN)
+
+    @aioresponses()
+    def test_request_order_status_missing_data_marks_canceled(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1735965009395131234",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+
+        url = web_utils.rest_url(CONSTANTS.MY_TRADES_PATH_URL)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.get(regex_url, body=json.dumps({"code": 0, "msg": "", "data": []}))
+
+        update = self.async_run_with_timeout(self.exchange._request_order_status(order))
+        self.assertEqual(update.new_state, OrderState.CANCELED)
+
+    @aioresponses()
+    def test_all_trade_updates_for_order_handles_list_and_empty(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="1735965009395131234",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=Decimal("0.05"),
+            amount=Decimal("100"),
+            order_type=OrderType.LIMIT,
+        )
+        order = self.exchange.in_flight_orders["OID1"]
+
+        url = web_utils.rest_url(CONSTANTS.MY_TRADES_PATH_URL)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+        mock_api.get(regex_url, body=json.dumps({"code": 0, "msg": "", "data": []}))
+        empty_updates = self.async_run_with_timeout(self.exchange._all_trade_updates_for_order(order))
+        self.assertEqual(empty_updates, [])
+
+        mock_api.get(regex_url, body=json.dumps({
+            "code": 0,
+            "msg": "",
+            "data": [{
+                "orderId": 1735965009395131234,
+                "price": "0.05",
+                "executedQty": "10",
+                "fee": "0.001",
+                "feeAsset": "USDT",
+                "updateTime": 1698910178296,
+            }],
+        }))
+        list_updates = self.async_run_with_timeout(self.exchange._all_trade_updates_for_order(order))
+        self.assertEqual(1, len(list_updates))
+        self.assertEqual(Decimal("10"), list_updates[0].fill_base_amount)
     def test_cancel_all_open_orders_bulk_success_marks_tracked_orders_canceled(self, mock_sleep):
         self.exchange._set_current_timestamp(1640780000)
         for idx, order_id in enumerate(["OID1", "OID2"], start=1):
